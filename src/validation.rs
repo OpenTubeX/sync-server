@@ -12,8 +12,9 @@ use crate::{
     },
     dto::{CreateVideo, ExtendedPlaylist, ExtendedPublicPlaylist},
     models::{Channel, Video},
-    youtube::{FeedRss, channel::ChannelFetcher, playlist::PlaylistFetcher},
 };
+
+use ytrss::{RssChannel, RssPlaylist};
 
 const ALLOWED_THUMBNAIL_DOMAINS: [&str; 5] = [
     "youtube.com",
@@ -42,6 +43,10 @@ fn verify_image_url(image_url: &str) -> bool {
     false
 }
 
+fn cmp_title(a: &str, b: &str) -> bool {
+    a.trim().eq_ignore_ascii_case(b.trim())
+}
+
 async fn is_channel_validation_required(conn: &mut DbConnection, channel: &Channel) -> bool {
     if !CONFIG.validate_submitted_metadata {
         return false;
@@ -65,25 +70,21 @@ pub async fn validate_channel_information_if_changed(
         return Ok(());
     }
 
-    let channel_info = ChannelFetcher::get_channel_rss(&channel.id)
+    let rss_channel = RssChannel::fetch_from_channel_id(&channel.id)
         .await
         .map_err(error::ErrorInternalServerError)?;
 
-    validate_channel_information(channel, &channel_info).map_err(error::ErrorBadRequest)
+    validate_channel_information(channel, &rss_channel).map_err(error::ErrorBadRequest)
 }
 
 /// Validate if the provided channel information is valid.
 /// If yes, the method returns an `Ok` result. If not, the method returns an `Err`
-fn validate_channel_information(channel: &Channel, feed_rss: &FeedRss) -> Result<(), String> {
+fn validate_channel_information(channel: &Channel, rss_channel: &RssChannel) -> Result<(), String> {
     if !verify_image_url(&channel.avatar) {
         return Err("invalid channel avatar provided".to_string());
     }
 
-    if !feed_rss
-        .channel_name
-        .trim()
-        .eq_ignore_ascii_case(channel.name.trim())
-    {
+    if !cmp_title(rss_channel.name(), &channel.name) {
         return Err("invalid channel information provided".to_string());
     }
 
@@ -122,14 +123,16 @@ pub async fn validate_video_information_if_changed(
     }
     let channel = channel.iter().next().unwrap();
 
-    let channel_rss = ChannelFetcher::get_channel_rss(&channel.id)
+    let channel_rss = RssChannel::fetch_from_channel_id(&channel.id)
         .await
         .map_err(error::ErrorInternalServerError)?;
     validate_channel_information(channel, &channel_rss).map_err(error::ErrorBadRequest)?;
 
     for video_data in video_datas.iter_mut() {
         // verification is only required if the channel doesn't exist yet or has changed since then
-        if let Some(existing_video) = get_video_by_id(conn, &video_data.id).await.ok().flatten()
+        let existing_video = get_video_by_id(conn, &video_data.id).await.ok().flatten();
+
+        if let Some(existing_video) = existing_video
             && std::convert::Into::<Video>::into(&*video_data) == existing_video
         {
             continue;
@@ -148,40 +151,30 @@ pub async fn validate_video_information_if_changed(
 /// because its metadata is more accurate.
 fn validate_video_information(
     video_data: CreateVideo,
-    channel_rss: &FeedRss,
+    rss_channel: &RssChannel,
 ) -> Result<CreateVideo, String> {
     // validate thumbnail URL
     if !verify_image_url(&video_data.thumbnail_url) {
         return Err("invalid channel information provided".to_string());
     }
 
-    // RSS feed doesn't contain videos, so we can't validate anything
-    if channel_rss.videos.is_empty() {
+    let Some(oldest_date) = rss_channel.oldest_video_date() else {
         return Ok(video_data);
-    }
-    let oldest_date = channel_rss
-        .videos
-        .last()
-        .map(|vid| vid.published_date)
-        .unwrap();
+    };
 
     // Video is older than the videos in the feed
     if oldest_date.timestamp_millis() > video_data.upload_date {
         return Ok(video_data);
     }
 
-    // look if video exists in RSS feed
-    for video_rss in &channel_rss.videos {
-        if video_rss.id == video_data.id {
-            // update video information to the one from the RSS feed
-            let mut video_data = video_data;
-            video_data.title = video_rss.title.clone();
-            video_data.upload_date = video_rss.published_date.timestamp_millis();
-            video_data.thumbnail_url = video_rss.thumbnail.clone();
+    let Some(rss_video) = rss_channel.find_video(&video_data.id) else {
+        return Ok(video_data);
+    };
 
-            return Ok(video_data);
-        }
-    }
+    let mut video_data = video_data;
+    video_data.title = rss_video.title().to_string();
+    video_data.upload_date = rss_video.date().timestamp_millis();
+    video_data.thumbnail_url = rss_video.thumbnail_url().to_string();
 
     Ok(video_data)
 }
@@ -194,12 +187,12 @@ pub async fn validate_public_playlist_information_if_changed(
         return Ok(playlist);
     }
 
-    let feed_rss = PlaylistFetcher::get_playlist_rss(&playlist.playlist.id)
+    let rss_playlist = RssPlaylist::fetch_from_playlist_id(&playlist.playlist.id)
         .await
         .map_err(error::ErrorInternalServerError)?;
 
     if is_channel_validation_required(conn, &playlist.uploader).await {
-        validate_channel_information(&playlist.uploader, &feed_rss)
+        validate_channel_information(&playlist.uploader, &rss_playlist.to_channel())
             .map_err(error::ErrorBadRequest)?;
     }
 
@@ -213,7 +206,7 @@ pub async fn validate_public_playlist_information_if_changed(
         return Ok(playlist);
     }
 
-    let validated_playlist = validate_playlist_information(playlist.playlist, &feed_rss)
+    let validated_playlist = validate_playlist_information(playlist.playlist, &rss_playlist)
         .map_err(error::ErrorBadRequest)?;
 
     Ok(ExtendedPublicPlaylist {
@@ -225,22 +218,23 @@ pub async fn validate_public_playlist_information_if_changed(
 // Update the given playlist based on the playlist's RSS feed.
 // This can only validate the title as that's the only info available in the channel.
 fn validate_playlist_information(
-    playlist: ExtendedPlaylist,
-    feed_rss: &FeedRss,
+    mut playlist: ExtendedPlaylist,
+    feed_rss: &RssPlaylist,
 ) -> Result<ExtendedPlaylist, String> {
     if let Some(video_count) = playlist.video_count
-        && feed_rss.videos.len() > video_count as usize
+        && feed_rss.video_count() > video_count as usize
     {
         return Err("video count is less than actual amount of videos".to_string());
     }
 
-    let mut validated = playlist;
-    validated.title = feed_rss.title.clone();
-    Ok(validated)
+    playlist.title = feed_rss.title().to_string();
+    Ok(playlist)
 }
 
 #[cfg(test)]
 mod test {
+    use ytrss::{RssChannel, RssPlaylist};
+
     use crate::{
         dto::{CreateVideo, ExtendedPlaylist},
         models::Channel,
@@ -248,7 +242,6 @@ mod test {
             validate_channel_information, validate_playlist_information,
             validate_video_information, verify_image_url,
         },
-        youtube::{channel::ChannelFetcher, playlist::PlaylistFetcher},
     };
 
     #[test]
@@ -266,7 +259,7 @@ mod test {
 
     #[actix_rt::test]
     async fn test_channel_validator() {
-        let channel_rss = ChannelFetcher::get_channel_rss("UC8-Th83bH_thdKZDJCrn88g")
+        let channel_rss = RssChannel::fetch_from_channel_id("UC8-Th83bH_thdKZDJCrn88g")
             .await
             .unwrap();
 
@@ -326,7 +319,7 @@ mod test {
             },
         };
 
-        let channel_rss = ChannelFetcher::get_channel_rss(&video.uploader.id)
+        let channel_rss = RssChannel::fetch_from_channel_id(&video.uploader.id)
             .await
             .unwrap();
         assert!(validate_video_information(video, &channel_rss).is_ok());
@@ -334,7 +327,7 @@ mod test {
 
     #[actix_rt::test]
     async fn test_playlist_validator() {
-        let channel_rss = PlaylistFetcher::get_playlist_rss("PLI-n-55RUT-_Ej39IlAxon_hOJWeET7cI")
+        let channel_rss = RssPlaylist::fetch_from_playlist_id("PLI-n-55RUT-_Ej39IlAxon_hOJWeET7cI")
             .await
             .unwrap();
 

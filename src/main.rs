@@ -29,7 +29,6 @@ mod models;
 mod openapi;
 mod schema;
 mod validation;
-mod youtube;
 
 static CONFIG: LazyLock<config::Config> = LazyLock::new(|| match config::build_config() {
     Ok(c) => c,
