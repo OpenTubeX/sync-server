@@ -94,8 +94,9 @@ async fn subscribe(
 ) -> actix_web::Result<impl Responder> {
     let mut conn = get_db_conn!(pool);
 
+    let mut channel = channel.into_inner();
     // verify that the provided information is valid
-    validate_channel_information_if_changed(&mut conn, &channel).await?;
+    validate_channel_information_if_changed(&mut conn, &mut channel).await?;
 
     match add_subscription_by_account_id(&mut conn, &channel, &account.id).await {
         Ok(_) => Ok(HttpResponse::Ok()),

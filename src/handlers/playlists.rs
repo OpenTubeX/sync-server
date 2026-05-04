@@ -206,10 +206,10 @@ async fn add_to_playlist(
         .sorted_by(|a, b| Ord::cmp(&a.uploader.id, &b.uploader.id))
         .chunk_by(|video| video.uploader.clone());
 
-    for (channel, videos) in &videos_grouped_by_uploader {
+    for (mut channel, videos) in &videos_grouped_by_uploader {
         let mut videos: Vec<_> = videos.cloned().collect();
 
-        validate_video_information_if_changed(&mut conn, &mut videos).await?;
+        validate_video_information_if_changed(&mut conn, &mut videos, &mut channel).await?;
 
         // store channel information first before storing video to ensure data integrity
         create_or_update_channel(&mut conn, &channel)

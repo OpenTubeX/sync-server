@@ -1,8 +1,9 @@
 //! Validates user-provided data to be valid (to some extent, as it only has limited info due to using YouTube's RSS feeds)
 
-use std::{collections::HashSet, str::FromStr};
+use std::{cmp::max, str::FromStr};
 
 use actix_web::{error, http::Uri};
+use itertools::Itertools;
 
 use crate::{
     CONFIG, DbConnection,
@@ -43,8 +44,34 @@ fn verify_image_url(image_url: &str) -> bool {
     false
 }
 
-fn cmp_title(a: &str, b: &str) -> bool {
-    a.trim().eq_ignore_ascii_case(b.trim())
+fn alphanumeric_words(s: &str) -> Vec<String> {
+    s.trim()
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .split(" ")
+        .map(|w| w.trim().to_string())
+        .collect_vec()
+}
+
+/// Checks whether the titles look somewhat similar.
+fn approx_cmp_title(a: &str, b: &str) -> bool {
+    let a_words = alphanumeric_words(a);
+    let b_words = alphanumeric_words(b);
+
+    let max_word_count = max(a_words.len(), b_words.len());
+    let mut matching_words = 0;
+    for a_word in &a_words {
+        for b_word in &b_words {
+            if a_word.contains(b_word) || b_word.contains(a_word) {
+                matching_words += 1;
+                break;
+            }
+        }
+    }
+
+    matching_words >= 1 && matching_words > max_word_count / 3
 }
 
 async fn is_channel_validation_required(conn: &mut DbConnection, channel: &Channel) -> bool {
@@ -64,7 +91,7 @@ async fn is_channel_validation_required(conn: &mut DbConnection, channel: &Chann
 
 pub async fn validate_channel_information_if_changed(
     conn: &mut DbConnection,
-    channel: &Channel,
+    channel: &mut Channel,
 ) -> actix_web::Result<()> {
     if !is_channel_validation_required(conn, channel).await {
         return Ok(());
@@ -74,21 +101,27 @@ pub async fn validate_channel_information_if_changed(
         .await
         .map_err(error::ErrorInternalServerError)?;
 
-    validate_channel_information(channel, &rss_channel).map_err(error::ErrorBadRequest)
+    validate_channel_information(channel.clone(), &rss_channel).map_err(error::ErrorBadRequest)?;
+
+    Ok(())
 }
 
 /// Validate if the provided channel information is valid.
 /// If yes, the method returns an `Ok` result. If not, the method returns an `Err`
-fn validate_channel_information(channel: &Channel, rss_channel: &RssChannel) -> Result<(), String> {
+fn validate_channel_information(
+    mut channel: Channel,
+    rss_channel: &RssChannel,
+) -> Result<Channel, String> {
     if !verify_image_url(&channel.avatar) {
         return Err("invalid channel avatar provided".to_string());
     }
 
-    if !cmp_title(rss_channel.name(), &channel.name) {
+    if !approx_cmp_title(rss_channel.name(), &channel.name) {
         return Err("invalid channel information provided".to_string());
     }
 
-    Ok(())
+    channel.name = rss_channel.name().to_string();
+    Ok(channel)
 }
 
 /// Requirement: all videos must be from the same channel!
@@ -97,7 +130,7 @@ pub async fn validate_video_information_if_changed_single(
     video_data: &mut CreateVideo,
 ) -> actix_web::Result<()> {
     let mut video_datas = vec![video_data.clone()];
-    validate_video_information_if_changed(conn, &mut video_datas).await?;
+    validate_video_information_if_changed(conn, &mut video_datas, &mut video_data.uploader).await?;
     (*video_data) = video_datas[0].clone();
 
     Ok(())
@@ -107,26 +140,25 @@ pub async fn validate_video_information_if_changed_single(
 pub async fn validate_video_information_if_changed(
     conn: &mut DbConnection,
     video_datas: &mut [CreateVideo],
+    channel: &mut Channel,
 ) -> actix_web::Result<()> {
     if !CONFIG.validate_submitted_metadata {
         return Ok(());
     }
 
-    let channel = video_datas
-        .iter()
-        .map(|video_data| video_data.uploader.clone())
-        .collect::<HashSet<Channel>>();
-    if channel.len() != 1 {
-        return Err(error::ErrorInternalServerError(
-            "can only process videos from the same channel",
-        ));
+    for video in video_datas.iter() {
+        if video.uploader != *channel {
+            return Err(error::ErrorInternalServerError(
+                "can only process videos from the same channel",
+            ));
+        }
     }
-    let channel = channel.iter().next().unwrap();
 
     let channel_rss = RssChannel::fetch_from_channel_id(&channel.id)
         .await
         .map_err(error::ErrorInternalServerError)?;
-    validate_channel_information(channel, &channel_rss).map_err(error::ErrorBadRequest)?;
+    (*channel) = validate_channel_information(channel.clone(), &channel_rss)
+        .map_err(error::ErrorBadRequest)?;
 
     for video_data in video_datas.iter_mut() {
         // verification is only required if the channel doesn't exist yet or has changed since then
@@ -191,8 +223,9 @@ pub async fn validate_public_playlist_information_if_changed(
         .await
         .map_err(error::ErrorInternalServerError)?;
 
-    if is_channel_validation_required(conn, &playlist.uploader).await {
-        validate_channel_information(&playlist.uploader, &rss_playlist.to_channel())
+    let mut uploader = playlist.uploader.clone();
+    if is_channel_validation_required(conn, &uploader).await {
+        uploader = validate_channel_information(uploader, &rss_playlist.to_channel())
             .map_err(error::ErrorBadRequest)?;
     }
 
@@ -211,7 +244,7 @@ pub async fn validate_public_playlist_information_if_changed(
 
     Ok(ExtendedPublicPlaylist {
         playlist: validated_playlist,
-        uploader: playlist.uploader,
+        uploader,
     })
 }
 
@@ -265,7 +298,7 @@ mod test {
 
         assert!(
             validate_channel_information(
-                &Channel {
+                Channel {
                     id: "UC8-Th83bH_thdKZDJCrn88g".to_string(),
                     name: "The Tonight Show Starring Jimmy Fallon".to_string(),
                     avatar: "https://i1.ytimg.com/vi/hTC6Xa5TrRc/hqdefault.jpg".to_string(),
@@ -278,7 +311,7 @@ mod test {
 
         assert!(
             validate_channel_information(
-                &Channel {
+                Channel {
                     id: "UC8-Th83bH_thdKZDJCrn88g".to_string(),
                     name: "The Tonight Show Starring Jimmy Fallon".to_string(),
                     avatar: "https://i1.example.com/vi/hTC6Xa5TrRc/hqdefault.jpg".to_string(),
@@ -291,7 +324,7 @@ mod test {
 
         assert!(
             validate_channel_information(
-                &Channel {
+                Channel {
                     id: "UC8-Th83bH_thdKZDJCrn88g".to_string(),
                     name: "Wrong channel name".to_string(),
                     avatar: "https://i1.example.com/vi/hTC6Xa5TrRc/hqdefault.jpg".to_string(),
@@ -300,6 +333,27 @@ mod test {
                 &channel_rss
             )
             .is_err()
+        );
+    }
+
+    #[actix_rt::test]
+    async fn test_channel_validator_mismatching_uploader_names() {
+        // the RSS uploader name is different to the one on the web UI
+        let channel_rss = RssChannel::fetch_from_channel_id("UCjp_3PEaOau_nT_3vnqKIvg")
+            .await
+            .unwrap();
+
+        assert!(
+            validate_channel_information(
+                Channel {
+                    id: "UCjp_3PEaOau_nT_3vnqKIvg".to_string(),
+                    name: "Junya Official Channel".to_string(),
+                    avatar: "https://yt3.googleusercontent.com/ytc/AIdro_mFt9iiVlgxD1gBW74I1o6H8xFtOg5AwqPj2_1JKHJ4UJg=s160-c-k-c0x00ffffff-no-rj".to_string(),
+                    verified: true,
+                },
+                &channel_rss
+            )
+            .is_ok()
         );
     }
 
