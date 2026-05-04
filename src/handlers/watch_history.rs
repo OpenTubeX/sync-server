@@ -58,7 +58,7 @@ struct WatchHistoryPaginationRequest {
     order: Option<WatchHistoryOrder>,
 }
 
-#[utoipa::path(responses((status = OK, body = Vec<ExtendedWatchHistoryItem>)), security(("api_jwt_token" = [])))]
+#[utoipa::path(responses((status = OK, body = Vec<ExtendedWatchHistoryItem>)), params(("page" = u32, Query)), security(("api_jwt_token" = [])))]
 #[get("/")]
 async fn get_watch_history(
     account: Account,
