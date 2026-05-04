@@ -38,8 +38,9 @@ impl ScopedHandler for WatchHistoryHandler {
             .service(get_watch_history)
             .service(get_from_watch_history)
             .service(add_to_watch_history)
-            .service(clear_watch_history)
+            .service(update_watch_history_video_state)
             .service(remove_from_watch_history)
+            .service(clear_watch_history)
     }
 }
 
