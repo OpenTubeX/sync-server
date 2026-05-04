@@ -45,11 +45,13 @@ pub async fn delete_playlist_by_id(
     conn: &mut DbConnection,
     playlist_id_: &str,
 ) -> Result<(), DbError> {
-    diesel::delete(playlist.filter(id.eq(playlist_id_.to_string())))
+    // delete linked videos first to ensure database integrity
+    // TODO: use ON DELETE CASCADE
+    diesel::delete(playlist_video_member.filter(playlist_id.eq(playlist_id_.to_string())))
         .execute(conn)
         .await?;
 
-    diesel::delete(playlist_video_member.filter(playlist_id.eq(playlist_id_.to_string())))
+    diesel::delete(playlist.filter(id.eq(playlist_id_.to_string())))
         .execute(conn)
         .await?;
 

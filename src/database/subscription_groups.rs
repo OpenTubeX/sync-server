@@ -98,6 +98,13 @@ pub async fn delete_subscription_group_by_id(
     subscription_group_id_: &str,
     account_id_: &str,
 ) -> Result<(), DbError> {
+    // delete all linked channels first to ensure database integrity
+    // TODO: use ON DELETE CASCADE
+    diesel::delete(subscription_group_member)
+        .filter(subscription_group_id.eq(subscription_group_id_))
+        .execute(conn)
+        .await?;
+
     diesel::delete(subscription_group)
         .filter(
             id.eq(subscription_group_id_)
