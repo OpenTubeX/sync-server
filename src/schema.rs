@@ -90,7 +90,7 @@ diesel::table! {
         video_id -> Text,
         account_id -> Text,
         added_date -> BigInt,
-        watched_state -> crate::models::WatchedStateMapping,
+        watched_state -> Text,
         position_millis -> Nullable<Integer>,
     }
 }

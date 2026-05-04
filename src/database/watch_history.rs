@@ -5,8 +5,8 @@ use diesel_async::RunQueryDsl as _;
 
 use crate::{
     DbConnection,
-    database::{DbError, channel::create_or_update_channel, video::create_or_update_video},
-    models::{Channel, Video, WatchHistoryItem, WatchedState},
+    database::DbError,
+    models::{Channel, Video, WatchHistoryItem},
     schema::{channel, video, watch_history::dsl::*},
 };
 
@@ -16,7 +16,7 @@ pub async fn get_watch_history_by_account_id(
     conn: &mut DbConnection,
     account_id_: &str,
     page_num: u32,
-    status: &Option<WatchedState>,
+    state: &Option<String>,
     sort_by_date_ascending: bool,
 ) -> Result<Vec<(WatchHistoryItem, Video, Channel)>, DbError> {
     // https://github.com/diesel-rs/diesel/issues/455
@@ -24,8 +24,8 @@ pub async fn get_watch_history_by_account_id(
         .filter(account_id.eq(account_id_))
         .into_boxed();
 
-    if let Some(status) = &status {
-        query = query.filter(watched_state.eq(status));
+    if let Some(state) = &state {
+        query = query.filter(watched_state.eq(state));
     }
 
     if sort_by_date_ascending {

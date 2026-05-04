@@ -153,6 +153,18 @@ pub struct ExtendedSubscriptionGroup {
     pub channels: Vec<Channel>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, ToSchema)]
+pub enum WatchedState {
+    #[serde(rename = "planned")]
+    Planned,
+    #[serde(rename = "watching")]
+    Watching,
+    #[serde(rename = "completed")]
+    Completed,
+    #[serde(rename = "dropped")]
+    Dropped,
+}
+
 /// Claims to store inside the JWT Token
 #[derive(Debug, Serialize, Deserialize)]
 pub struct JwtClaims {

@@ -15,10 +15,10 @@ use crate::{
             remove_video_from_watch_history,
         },
     },
-    dto::{CreateVideo, ExtendedWatchHistoryItem},
+    dto::{CreateVideo, ExtendedWatchHistoryItem, WatchedState},
     get_db_conn,
     handlers::{ScopedHandler, user::auth_middleware},
-    models::{Account, WatchHistoryItem, WatchedState},
+    models::{Account, WatchHistoryItem},
     validation::validate_video_information_if_changed_single,
 };
 
@@ -54,7 +54,7 @@ enum WatchHistoryOrder {
 #[derive(Deserialize)]
 struct WatchHistoryPaginationRequest {
     page: u32,
-    status: Option<WatchedState>,
+    state: Option<WatchedState>,
     order: Option<WatchHistoryOrder>,
 }
 
@@ -67,11 +67,17 @@ async fn get_watch_history(
 ) -> actix_web::Result<impl Responder> {
     let mut conn = get_db_conn!(pool);
 
+    let watched_state = params
+        .state
+        .clone()
+        .map(|s| serde_json::ser::to_string(&s).unwrap());
+    dbg!(&watched_state);
+
     match get_watch_history_by_account_id(
         &mut conn,
         &account.id,
         params.page,
-        &params.status,
+        &watched_state,
         params.order == Some(WatchHistoryOrder::AddedDateAscending),
     )
     .await

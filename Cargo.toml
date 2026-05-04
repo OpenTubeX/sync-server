@@ -23,7 +23,6 @@ diesel-async = { version = "0.8", features = [
   "migrations"
 ] }
 diesel_migrations = { version = "2.3" }
-diesel-derive-enum = { version = "3.0.0-beta.1" }
 uuid = { version = "1", features = ["serde", "v7"] }
 
 # Logging
@@ -46,11 +45,14 @@ reqwest = "0.13"
 roxmltree = "0.21"
 
 # Helper crates
-config = { version = "0.15.22", default-features = false, features = ["convert-case", "toml"] }
+config = { version = "0.15.22", default-features = false, features = [
+  "convert-case",
+  "toml"
+] }
 itertools = "0.14"
 
 [features]
 default = ["sqlite"]
 # default = ["postgres"]
-postgres = ["diesel-async/postgres", "diesel-derive-enum/postgres"]
-sqlite = ["diesel-async/sqlite", "diesel/returning_clauses_for_sqlite_3_35", "diesel-derive-enum/sqlite"]
+postgres = ["diesel-async/postgres"]
+sqlite = ["diesel-async/sqlite", "diesel/returning_clauses_for_sqlite_3_35"]

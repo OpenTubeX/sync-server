@@ -194,16 +194,6 @@ pub struct PlaylistBookmark {
 }
 
 #[derive(
-    Debug, Clone, Serialize, Deserialize, Eq, PartialEq, diesel_derive_enum::DbEnum, ToSchema,
-)]
-pub enum WatchedState {
-    Planned,
-    Watching,
-    Completed,
-    Dropped,
-}
-
-#[derive(
     Debug,
     Clone,
     Serialize,
@@ -227,6 +217,7 @@ pub struct WatchHistoryItem {
     pub account_id: String,
     /// Date as UNIX timestamp (millis).
     pub added_date: i64,
-    pub watched_state: WatchedState,
+    /// See the available options in [WatchedState].
+    pub watched_state: String,
     pub position_millis: Option<i32>,
 }
