@@ -147,11 +147,13 @@ pub struct Video {
 #[derive(
     Debug, Clone, Serialize, Deserialize, Queryable, Selectable, Insertable, ToSchema, Eq, PartialEq,
 )]
-#[diesel(primary_key(playlist_id, video_id))]
+#[diesel(primary_key(account_id, playlist_id, video_id))]
+#[diesel(belongs_to(Account))]
 #[diesel(belongs_to(Playlist))]
 #[diesel(belongs_to(Video))]
 #[diesel(table_name = playlist_video_member)]
 pub struct PlaylistVideoMember {
+    pub account_id: String,
     pub playlist_id: String,
     pub video_id: String,
 }

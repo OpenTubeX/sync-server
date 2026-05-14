@@ -53,9 +53,10 @@ async fn get_playlist(
 ) -> actix_web::Result<impl Responder> {
     let mut conn = get_db_conn!(pool);
 
-    let Some((playlist, videos)) = get_playlist_by_id_with_videos(&mut conn, &playlist_id)
-        .await
-        .map_err(error::ErrorInternalServerError)?
+    let Some((playlist, videos)) =
+        get_playlist_by_id_with_videos(&mut conn, &playlist_id, &account.id)
+            .await
+            .map_err(error::ErrorInternalServerError)?
     else {
         return Err(error::ErrorNotFound("playlist does not exist"));
     };
@@ -85,7 +86,7 @@ async fn get_playlists(account: Account, pool: WebData) -> actix_web::Result<imp
 
     let mut extended_playlists: Vec<ExtendedPlaylist> = vec![];
     for playlist in &playlists {
-        let video_count = get_playlist_video_count(&mut conn, &playlist.id)
+        let video_count = get_playlist_video_count(&mut conn, &playlist.id, &account.id)
             .await
             .unwrap_or(-1);
         let extended_playlist = ExtendedPlaylist::from_playlist(playlist, video_count as u64);
@@ -104,8 +105,16 @@ async fn create_playlist(
 ) -> actix_web::Result<impl Responder> {
     let mut conn = get_db_conn!(pool);
 
+    if let Some(ref id) = playlist_data.id
+        && get_owned_playlist_or_error(&mut conn, id, &account.id)
+            .await
+            .is_ok()
+    {
+        return Err(error::ErrorConflict("playlist already exists"));
+    }
+
     let playlist = Playlist {
-        id: String::new(),
+        id: playlist_data.id.clone().unwrap_or_default(),
         account_id: account.id.clone(),
         title: playlist_data.title.clone(),
         description: playlist_data.description.clone(),
@@ -127,16 +136,10 @@ async fn get_owned_playlist_or_error(
     playlist_id: &str,
     account_id: &str,
 ) -> actix_web::Result<Playlist> {
-    let playlist = get_playlist_by_id(conn, playlist_id)
+    Ok(get_playlist_by_id(conn, playlist_id, &account_id)
         .await
-        .map_err(error::ErrorInternalServerError)?;
-
-    let playlist = playlist.ok_or_else(|| error::ErrorNotFound("playlist doesn't exist"))?;
-    if playlist.account_id != account_id {
-        return Err(error::ErrorForbidden("not the owner of the playlist"));
-    }
-
-    Ok(playlist)
+        .map_err(error::ErrorInternalServerError)?
+        .ok_or_else(|| error::ErrorNotFound("playlist doesn't exist"))?)
 }
 
 #[utoipa::path(responses((status = OK, body = Playlist)), security(("api_jwt_token" = [])))]
@@ -159,9 +162,9 @@ async fn update_playlist(
         thumbnail_url: playlist_data.thumbnail_url.clone(),
     };
 
-    match update_existing_playlist(&mut conn, &playlist).await {
+    match update_existing_playlist(&mut conn, &playlist, &account.id).await {
         Ok(playlist) => {
-            let video_count = get_playlist_video_count(&mut conn, &playlist.id)
+            let video_count = get_playlist_video_count(&mut conn, &playlist.id, &account.id)
                 .await
                 .unwrap_or(-1);
             let extended_playlist = ExtendedPlaylist::from_playlist(&playlist, video_count as u64);
@@ -182,7 +185,7 @@ async fn delete_playlist(
 
     get_owned_playlist_or_error(&mut conn, &playlist_id, &account.id).await?;
 
-    match delete_playlist_by_id(&mut conn, &playlist_id).await {
+    match delete_playlist_by_id(&mut conn, &playlist_id, &account.id).await {
         Ok(()) => Ok(HttpResponse::Ok().json(())),
         Err(err) => Err(error::ErrorInternalServerError(err)),
     }
@@ -217,7 +220,7 @@ async fn add_to_playlist(
             .map_err(error::ErrorInternalServerError)?;
 
         for video in videos {
-            add_video_to_playlist(&mut conn, &playlist_id, &(&video).into())
+            add_video_to_playlist(&mut conn, &playlist_id, &account.id, &(&video).into())
                 .await
                 .map_err(error::ErrorInternalServerError)?;
         }
@@ -239,7 +242,7 @@ async fn remove_from_playlist(
 
     get_owned_playlist_or_error(&mut conn, &playlist_id, &account.id).await?;
 
-    match remove_video_from_playlist(&mut conn, &playlist_id, &video_id).await {
+    match remove_video_from_playlist(&mut conn, &playlist_id, &account.id, &video_id).await {
         Ok(()) => Ok(HttpResponse::Ok()),
         Err(err) => Err(error::ErrorInternalServerError(err)),
     }

@@ -18,7 +18,7 @@ diesel::table! {
 }
 
 diesel::table! {
-    playlist (id) {
+    playlist (id, account_id) {
         id -> Text,
         account_id -> Text,
         title -> Text,
@@ -35,7 +35,8 @@ diesel::table! {
 }
 
 diesel::table! {
-    playlist_video_member (playlist_id, video_id) {
+    playlist_video_member (account_id, playlist_id, video_id) {
+        account_id -> Text,
         playlist_id -> Text,
         video_id -> Text,
     }
@@ -98,7 +99,7 @@ diesel::table! {
 diesel::joinable!(playlist -> account (account_id));
 diesel::joinable!(playlist_bookmark -> account (account_id));
 diesel::joinable!(playlist_bookmark -> public_playlist (public_playlist_id));
-diesel::joinable!(playlist_video_member -> playlist (playlist_id));
+diesel::joinable!(playlist_video_member -> account (account_id));
 diesel::joinable!(playlist_video_member -> video (video_id));
 diesel::joinable!(public_playlist -> channel (uploader_id));
 diesel::joinable!(subscription -> account (account_id));

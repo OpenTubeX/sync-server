@@ -29,6 +29,7 @@ pub struct DeleteUser {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct CreatePlaylist {
+    pub id: Option<String>,
     pub title: String,
     pub description: String,
     pub thumbnail_url: Option<String>,
