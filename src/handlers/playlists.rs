@@ -44,7 +44,7 @@ impl ScopedHandler for PlaylistsHandler {
     }
 }
 
-#[utoipa::path(responses((status = OK, body = PlaylistResponse)))]
+#[utoipa::path(responses((status = OK, body = PlaylistResponse)), security(("api_jwt_token" = [])))]
 #[get("/{playlist_id}")]
 async fn get_playlist(
     account: Account,
@@ -136,10 +136,10 @@ async fn get_owned_playlist_or_error(
     playlist_id: &str,
     account_id: &str,
 ) -> actix_web::Result<Playlist> {
-    Ok(get_playlist_by_id(conn, playlist_id, &account_id)
+    get_playlist_by_id(conn, playlist_id, account_id)
         .await
         .map_err(error::ErrorInternalServerError)?
-        .ok_or_else(|| error::ErrorNotFound("playlist doesn't exist"))?)
+        .ok_or_else(|| error::ErrorNotFound("playlist doesn't exist"))
 }
 
 #[utoipa::path(responses((status = OK, body = Playlist)), security(("api_jwt_token" = [])))]
