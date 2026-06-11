@@ -127,11 +127,15 @@ pub async fn get_playlist_by_id(
     playlist_id_: &str,
     account_id_: &str,
 ) -> Result<Option<Playlist>, DbError> {
-    let playlist_ = playlist
+    let mut playlist_: Option<Playlist> = playlist
         .filter(id.eq(playlist_id_).and(playlist_account_id.eq(account_id_)))
         .first(conn)
         .await
         .optional()?;
+
+    if let Some(ref mut playlist_) = playlist_ {
+        assign_thumbnail_if_missing(conn, playlist_).await?;
+    }
 
     Ok(playlist_)
 }
@@ -159,6 +163,38 @@ pub async fn get_playlist_by_id_with_videos(
     Ok(Some((playlist_, videos)))
 }
 
+pub async fn get_playlist_first_video(
+    conn: &mut DbConnection,
+    playlist_id_: &str,
+    account_id_: &str,
+) -> Result<Option<Video>, DbError> {
+    playlist_video_member
+        .filter(
+            playlist_id
+                .eq(playlist_id_)
+                .and(playlist_video_member_account_id.eq(account_id_)),
+        )
+        .inner_join(video::table)
+        .select(Video::as_select())
+        .first(conn)
+        .await
+        .optional()
+}
+
+pub async fn assign_thumbnail_if_missing(
+    conn: &mut DbConnection,
+    playlist_: &mut Playlist,
+) -> Result<(), DbError> {
+    if playlist_.thumbnail_url.is_none()
+        && let Some(first_video) =
+            get_playlist_first_video(conn, &playlist_.id, &playlist_.account_id).await?
+    {
+        playlist_.thumbnail_url = Some(first_video.thumbnail_url);
+    }
+
+    Ok(())
+}
+
 pub async fn get_playlist_video_count(
     conn: &mut DbConnection,
     playlist_id_: &str,
@@ -180,11 +216,15 @@ pub async fn get_playlists_by_account_id(
     conn: &mut DbConnection,
     account_id_: &str,
 ) -> Result<Vec<Playlist>, DbError> {
-    let playlists = playlist
+    let mut playlists = playlist
         .filter(playlist_account_id.eq(account_id_.to_string()))
         .select(Playlist::as_select())
         .load(conn)
         .await?;
+
+    for playlist_ in &mut playlists {
+        assign_thumbnail_if_missing(conn, playlist_).await?;
+    }
 
     Ok(playlists)
 }
