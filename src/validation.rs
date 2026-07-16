@@ -1,8 +1,7 @@
 //! Validates user-provided data to be valid (to some extent, as it only has limited info due to using YouTube's RSS feeds)
 
-use std::{cmp::max, str::FromStr};
+use std::cmp::max;
 
-use actix_web::http::Uri;
 use itertools::Itertools;
 
 use crate::{
@@ -27,12 +26,11 @@ const ALLOWED_THUMBNAIL_DOMAINS: [&str; 5] = [
 ];
 
 fn verify_image_url(image_url: &str) -> bool {
-    // TODO: don't rely on Actix for this, bad separation of concerns
-    let Ok(uri) = Uri::from_str(image_url) else {
+    let Ok(url) = url::Url::parse(image_url) else {
         return false;
     };
 
-    let Some(host) = uri.host() else {
+    let Some(host) = url.host_str() else {
         return false;
     };
 
