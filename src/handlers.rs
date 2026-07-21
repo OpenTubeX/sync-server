@@ -11,6 +11,7 @@ use utoipa_actix_web::scope::Scope;
 
 use crate::models::Account;
 
+pub mod channel_playback_speeds;
 pub mod health;
 pub mod playlist_bookmarks;
 pub mod playlists;

@@ -18,6 +18,14 @@ diesel::table! {
 }
 
 diesel::table! {
+    channel_playback_speed (account_id, channel_id) {
+        account_id -> Text,
+        channel_id -> Text,
+        playback_speed -> Double,
+    }
+}
+
+diesel::table! {
     playlist (id, account_id) {
         id -> Text,
         account_id -> Text,
@@ -97,6 +105,7 @@ diesel::table! {
 }
 
 diesel::joinable!(playlist -> account (account_id));
+diesel::joinable!(channel_playback_speed -> account (account_id));
 diesel::joinable!(playlist_bookmark -> account (account_id));
 diesel::joinable!(playlist_bookmark -> public_playlist (public_playlist_id));
 diesel::joinable!(playlist_video_member -> account (account_id));
@@ -114,6 +123,7 @@ diesel::joinable!(watch_history -> video (video_id));
 diesel::allow_tables_to_appear_in_same_query!(
     account,
     channel,
+    channel_playback_speed,
     playlist,
     playlist_bookmark,
     playlist_video_member,

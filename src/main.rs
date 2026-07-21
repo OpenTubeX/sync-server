@@ -13,7 +13,8 @@ use utoipa_scalar::{Scalar, Servable};
 
 use crate::{
     handlers::{
-        ScopedHandler, health::HealthHandler, playlist_bookmarks::PlaylistBookmarksHandler,
+        ScopedHandler, channel_playback_speeds::ChannelPlaybackSpeedsHandler,
+        health::HealthHandler, playlist_bookmarks::PlaylistBookmarksHandler,
         playlists::PlaylistsHandler, subscriptions::SubscriptionsHandler, user::UserHandler,
         watch_history::WatchHistoryHandler,
     },
@@ -75,6 +76,7 @@ async fn main() -> io::Result<()> {
             .service(
                 utoipa_actix_web::scope("/v1")
                     .service(UserHandler::get_service())
+                    .service(ChannelPlaybackSpeedsHandler::get_service())
                     .service(SubscriptionsHandler::get_service())
                     .service(PlaylistsHandler::get_service())
                     .service(PlaylistBookmarksHandler::get_service())

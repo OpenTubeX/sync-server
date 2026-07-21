@@ -1,12 +1,14 @@
-# LibreTube Sync Server
-Server to synchronize streaming service data (e.g. subscriptions, playlists) between devices, built for LibreTube.
+# OpenTubeX Sync Server
+Server to synchronize OpenTubeX data between devices, including subscriptions, playlists, watch history, and channel playback speeds.
+
+This project is based on the [LibreTube sync server](https://github.com/libre-tube/sync-server).
 
 ## Running
 It's recommended to run the app with Docker.
 
 There are multiple prebuilt Docker images, built for ARM64 and x86:
-- `latest-postgres`: uses PostgresQL as database backend
-- `latest-sqlite`: uses SQLite as database backend
+- `ghcr.io/opentubex/sync-server:latest-postgres`: uses PostgreSQL as database backend
+- `ghcr.io/opentubex/sync-server:latest-sqlite`: uses SQLite as database backend
 
 For reference, please see the example `docker-compose` files at [docker-compose.yml](./docker-compose.yml) and [docker-compose.postgres.yml](./docker-compose.postgres.yml).
 

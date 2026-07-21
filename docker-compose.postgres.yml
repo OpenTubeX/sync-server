@@ -1,13 +1,13 @@
 services:
   sync:
-    container_name: libretube-sync
-    image: ghcr.io/libre-tube/sync-server:main-postgres
+    container_name: opentubex-sync
+    image: ghcr.io/opentubex/sync-server:latest-postgres
     build:
       context: .
       args:
         - "DATABASE_BACKEND=postgres"
     environment:
-      - "DATABASE_URL=postgres://postgres:password@db/libretube-sync"
+      - "DATABASE_URL=postgres://postgres:password@db/opentubex-sync"
       - "SECRET_KEY=changeme"
       - "ALLOW_REGISTRATION=true"
       - "VALIDATE_SUBMITTED_METADATA=true"
@@ -22,11 +22,11 @@ services:
 
   db:
     image: postgres:18
-    container_name: libretube-sync-postgres
+    container_name: opentubex-sync-postgres
     environment:
       - "POSTGRES_USER=postgres"
       - "POSTGRES_PASSWORD=password"
-      - "POSTGRES_DB=libretube-sync"
+      - "POSTGRES_DB=opentubex-sync"
     volumes:
       - ./data:/var/lib/postgresql
     restart: unless-stopped

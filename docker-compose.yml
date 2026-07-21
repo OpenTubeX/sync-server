@@ -1,19 +1,18 @@
 services:
   sync:
-    container_name: libretube-sync
-    image: ghcr.io/libre-tube/sync-server:main-sqlite
+    container_name: opentubex-sync
+    image: ghcr.io/opentubex/sync-server:latest-sqlite
     build:
       context: .
       args:
         - "DATABASE_BACKEND=sqlite"
     environment:
-      - "DATABASE_URL=./db.sqlite"
+      - "DATABASE_URL=./data/db.sqlite"
       - "SECRET_KEY=changeme"
       - "ALLOW_REGISTRATION=true"
       - "VALIDATE_SUBMITTED_METADATA=true"
-    # Or use a configuration file:
-    # volumes:
-    #   - ./config.toml:/app/config.toml
+    volumes:
+      - ./data:/app/data
     ports:
       - "127.0.0.1:8080:8080"
     restart: unless-stopped
