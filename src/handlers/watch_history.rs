@@ -1,4 +1,5 @@
 use actix_web::{HttpResponse, Responder, delete, get, middleware::from_fn, patch, put, web};
+use diesel_async::{AsyncConnection, scoped_futures::ScopedFutureExt};
 use serde::Deserialize;
 use utoipa_actix_web::scope;
 
@@ -8,9 +9,9 @@ use crate::{
         channel::create_or_update_channel,
         video::create_or_update_video,
         watch_history::{
-            add_or_update_video_to_watch_history, clear_watch_history_by_account_id,
-            get_watch_history_by_account_id, get_watch_history_entry,
-            remove_video_from_watch_history,
+            DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, add_or_update_video_to_watch_history,
+            clear_watch_history_by_account_id, get_watch_history_by_account_id,
+            get_watch_history_entry, remove_video_from_watch_history,
         },
     },
     dto::{CreateVideo, ExtendedWatchHistoryItem, WatchedState},
@@ -43,7 +44,7 @@ impl ScopedHandler for WatchHistoryHandler {
     }
 }
 
-async fn store_watch_history_item(
+async fn prepare_watch_history_item(
     conn: &mut crate::DbConnection,
     account_id: &str,
     mut item: ExtendedWatchHistoryItem,
@@ -52,6 +53,13 @@ async fn store_watch_history_item(
     item.metadata.video_id = item.video.id.clone();
 
     validate_video_information_if_changed_single(conn, &mut item.video).await?;
+    Ok(item)
+}
+
+async fn persist_watch_history_item(
+    conn: &mut crate::DbConnection,
+    item: &ExtendedWatchHistoryItem,
+) -> HandlerResult<()> {
     create_or_update_channel(conn, &item.video.uploader)
         .await
         .map_err(|_| HandlerError::InternalDatabaseError)?;
@@ -62,6 +70,16 @@ async fn store_watch_history_item(
         .await
         .map_err(|_| HandlerError::InternalDatabaseError)?;
 
+    Ok(())
+}
+
+async fn store_watch_history_item(
+    conn: &mut crate::DbConnection,
+    account_id: &str,
+    item: ExtendedWatchHistoryItem,
+) -> HandlerResult<ExtendedWatchHistoryItem> {
+    let item = prepare_watch_history_item(conn, account_id, item).await?;
+    persist_watch_history_item(conn, &item).await?;
     Ok(item)
 }
 
@@ -73,10 +91,23 @@ async fn add_to_watch_history_bulk(
     items: web::Json<Vec<ExtendedWatchHistoryItem>>,
 ) -> HandlerResult<impl Responder> {
     let mut conn = get_db_conn!(pool);
+    let items = items.into_inner();
+    let mut prepared_items = Vec::with_capacity(items.len());
 
-    for item in items.into_inner() {
-        store_watch_history_item(&mut conn, &account.id, item).await?;
+    for item in items {
+        prepared_items.push(prepare_watch_history_item(&mut conn, &account.id, item).await?);
     }
+
+    conn.transaction::<_, HandlerError, _>(|conn| {
+        async move {
+            for item in &prepared_items {
+                persist_watch_history_item(conn, item).await?;
+            }
+            Ok(())
+        }
+        .scope_boxed()
+    })
+    .await?;
 
     Ok(HttpResponse::Ok())
 }
@@ -91,11 +122,12 @@ enum WatchHistoryOrder {
 #[derive(Deserialize)]
 struct WatchHistoryPaginationRequest {
     page: u32,
+    page_size: Option<u32>,
     state: Option<WatchedState>,
     order: Option<WatchHistoryOrder>,
 }
 
-#[utoipa::path(responses((status = OK, body = Vec<ExtendedWatchHistoryItem>)), params(("page" = u32, Query)), security(("api_jwt_token" = [])))]
+#[utoipa::path(responses((status = OK, body = Vec<ExtendedWatchHistoryItem>)), params(("page" = u32, Query), ("page_size" = Option<u32>, Query)), security(("api_jwt_token" = [])))]
 #[get("/")]
 async fn get_watch_history(
     account: Account,
@@ -108,12 +140,16 @@ async fn get_watch_history(
         .state
         .clone()
         .map(|s| serde_json::ser::to_string(&s).unwrap());
-    dbg!(&watched_state);
+    let page_size = params
+        .page_size
+        .unwrap_or(DEFAULT_PAGE_SIZE)
+        .clamp(1, MAX_PAGE_SIZE);
 
     match get_watch_history_by_account_id(
         &mut conn,
         &account.id,
         params.page,
+        page_size,
         &watched_state,
         params.order == Some(WatchHistoryOrder::AddedDateAscending),
     )

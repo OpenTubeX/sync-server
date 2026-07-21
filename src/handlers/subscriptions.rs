@@ -1,4 +1,5 @@
 use actix_web::{HttpResponse, Responder, delete, get, middleware::from_fn, patch, post, put, web};
+use diesel_async::{AsyncConnection, scoped_futures::ScopedFutureExt};
 use utoipa_actix_web::scope;
 
 use crate::{
@@ -74,13 +75,22 @@ async fn subscribe_bulk(
     channels: web::Json<Vec<Channel>>,
 ) -> HandlerResult<impl Responder> {
     let mut conn = get_db_conn!(pool);
+    let mut channels = channels.into_inner();
 
-    for mut channel in channels.into_inner() {
-        validate_channel_information_if_changed(&mut conn, &mut channel).await?;
-        add_subscription_by_account_id(&mut conn, &channel, &account.id)
-            .await
-            .map_err(|err| HandlerError::InternalDatabaseErrorWithContext(err.to_string()))?;
+    for channel in &mut channels {
+        validate_channel_information_if_changed(&mut conn, channel).await?;
     }
+
+    conn.transaction::<_, HandlerError, _>(|conn| {
+        async move {
+            for channel in &channels {
+                add_subscription_by_account_id(conn, channel, &account.id).await?;
+            }
+            Ok(())
+        }
+        .scope_boxed()
+    })
+    .await?;
 
     Ok(HttpResponse::Ok())
 }

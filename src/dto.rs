@@ -25,6 +25,8 @@ pub struct LoginResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SyncCapabilities {
     pub encrypted_sync: u8,
+    pub bulk_sync: u8,
+    pub history_page_size: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

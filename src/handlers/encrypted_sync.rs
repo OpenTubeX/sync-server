@@ -5,6 +5,7 @@ use diesel::result::DatabaseErrorKind;
 use utoipa_actix_web::scope;
 
 use crate::database::encrypted_sync;
+use crate::database::watch_history::MAX_PAGE_SIZE;
 use crate::dto::{EncryptedSyncResponse, PutEncryptedSync, SyncCapabilities};
 use crate::handlers::user::auth_middleware;
 use crate::handlers::{HandlerError, HandlerResult, ScopedHandler};
@@ -38,7 +39,11 @@ impl ScopedHandler for EncryptedSyncHandler {
 #[utoipa::path(responses((status = OK, body = SyncCapabilities)))]
 #[get("/capabilities")]
 async fn capabilities() -> impl Responder {
-    web::Json(SyncCapabilities { encrypted_sync: 1 })
+    web::Json(SyncCapabilities {
+        encrypted_sync: 1,
+        bulk_sync: 1,
+        history_page_size: MAX_PAGE_SIZE,
+    })
 }
 
 #[utoipa::path(responses((status = OK, body = EncryptedSyncResponse)), security(("api_jwt_token" = [])))]

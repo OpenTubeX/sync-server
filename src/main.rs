@@ -80,12 +80,12 @@ async fn main() -> io::Result<()> {
             .service(
                 utoipa_actix_web::scope("/v1")
                     .service(UserHandler::get_service())
-                    .service(EncryptedSyncHandler::get_service())
                     .service(ChannelPlaybackSpeedsHandler::get_service())
                     .service(SubscriptionsHandler::get_service())
                     .service(PlaylistsHandler::get_service())
                     .service(PlaylistBookmarksHandler::get_service())
-                    .service(WatchHistoryHandler::get_service()),
+                    .service(WatchHistoryHandler::get_service())
+                    .service(EncryptedSyncHandler::get_service()),
             )
             .split_for_parts();
 

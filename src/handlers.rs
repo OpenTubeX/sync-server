@@ -99,6 +99,12 @@ impl ResponseError for HandlerError {
 
 pub type HandlerResult<T> = Result<T, HandlerError>;
 
+impl From<diesel::result::Error> for HandlerError {
+    fn from(error: diesel::result::Error) -> Self {
+        Self::InternalDatabaseErrorWithContext(error.to_string())
+    }
+}
+
 // https://github.com/actix/actix-web/discussions/3074
 pub trait ScopedHandler {
     fn get_service() -> Scope<
