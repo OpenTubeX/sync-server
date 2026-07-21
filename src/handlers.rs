@@ -62,6 +62,8 @@ pub enum HandlerError {
     EncryptedSyncConflict,
     #[error("encrypted sync collection is too large")]
     EncryptedSyncTooLarge,
+    #[error("encrypted sync account storage quota exceeded")]
+    EncryptedSyncQuotaExceeded,
     #[error("this account requires the encrypted sync endpoint")]
     EncryptedSyncRequired,
     #[error("failed to load data from YouTube")]
@@ -91,6 +93,7 @@ impl ResponseError for HandlerError {
             Self::ValidationErrorWithContext(_) => StatusCode::BAD_REQUEST,
             Self::EncryptedSyncConflict => StatusCode::CONFLICT,
             Self::EncryptedSyncTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::EncryptedSyncQuotaExceeded => StatusCode::PAYLOAD_TOO_LARGE,
             Self::EncryptedSyncRequired => StatusCode::CONFLICT,
             Self::YouTubeConnectError => StatusCode::INTERNAL_SERVER_ERROR,
         }
