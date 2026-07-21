@@ -16,7 +16,7 @@ use crate::models::{Account, EncryptedSync};
 use crate::{WebData, get_db_conn};
 
 const MAX_ENCRYPTED_SYNC_BYTES: usize = 64 * 1024 * 1024;
-const COLLECTIONS: [&str; 7] = [
+const COLLECTIONS: [&str; 8] = [
     "subscriptions",
     "playlists",
     "history",
@@ -24,6 +24,7 @@ const COLLECTIONS: [&str; 7] = [
     "profiles",
     "settings",
     "playlistBookmarks",
+    "sessions",
 ];
 const LEGACY_ENCRYPTED_COLLECTIONS: [&str; 6] = [
     "subscriptions",
