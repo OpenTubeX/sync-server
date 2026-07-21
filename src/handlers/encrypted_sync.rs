@@ -110,7 +110,7 @@ async fn put_encrypted_sync(
 
     Ok(HttpResponse::Ok().json(EncryptedSyncResponse {
         revision: next_revision,
-        payload: Some(form.payload.clone()),
+        payload: None,
         legacy_data: false,
     }))
 }
