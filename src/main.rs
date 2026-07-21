@@ -1,9 +1,11 @@
 #[macro_use]
 extern crate diesel;
 
-use std::{io, sync::LazyLock};
+use std::{io, path::Path, sync::LazyLock};
 
 use actix_web::{App, HttpServer, middleware, web};
+#[cfg(feature = "sqlite")]
+use diesel::connection::SimpleConnection;
 #[cfg(feature = "sqlite")]
 use diesel_async::pooled_connection::ManagerConfig;
 use diesel_async::pooled_connection::{AsyncDieselConnectionManager, PoolError, bb8::Pool};
@@ -68,7 +70,12 @@ async fn main() -> io::Result<()> {
     };
 
     // run database migrations (must be done BEFORE the server is started!)
-    run_migrations(&pool).await;
+    run_migrations(
+        &pool,
+        &CONFIG.database_url,
+        CONFIG.migration_approval.as_deref(),
+    )
+    .await;
 
     log::info!("starting HTTP server at http://localhost:8080");
 
@@ -131,16 +138,75 @@ async fn initialize_db_pool(db_url: &str) -> Result<DbPool, PoolError> {
     Pool::builder().build(connection_manager).await
 }
 
-async fn run_migrations(pool: &DbPool) {
+fn require_migration_approval(
+    has_applied_migrations: bool,
+    pending_versions: &[String],
+    approval: Option<&str>,
+) -> Result<(), String> {
+    if !has_applied_migrations || pending_versions.is_empty() {
+        return Ok(());
+    }
+
+    let required = pending_versions.join(",");
+    if approval == Some(required.as_str()) {
+        return Ok(());
+    }
+
+    Err(format!(
+        "refusing to migrate an existing database; create and verify a backup, then set MIGRATION_APPROVAL={required} for this deployment"
+    ))
+}
+
+#[cfg(feature = "sqlite")]
+fn back_up_sqlite_before_migration(
+    conn: &mut diesel::SqliteConnection,
+    database_url: &str,
+    latest_version: &str,
+) {
+    let backup_path = format!("{database_url}.pre-migration-{latest_version}");
+    if Path::new(&backup_path).exists() {
+        log::info!("using existing pre-migration backup at {backup_path}");
+        return;
+    }
+
+    let escaped_path = backup_path.replace('\'', "''");
+    conn.batch_execute(&format!("VACUUM INTO '{escaped_path}'"))
+        .unwrap_or_else(|error| {
+            panic!("failed to create migration backup at {backup_path}: {error}")
+        });
+    log::info!("created pre-migration backup at {backup_path}");
+}
+
+async fn run_migrations(pool: &DbPool, database_url: &str, approval: Option<&str>) {
     // https://github.com/diesel-rs/diesel_async/discussions/268
     let conn = pool.get_owned().await.unwrap();
 
     #[cfg(feature = "sqlite")]
     {
         let mut conn = conn;
-        conn.spawn_blocking(|conn| {
-            // we panic if migrations fail, because otherwise the app wouldn't work anyways
-            conn.run_pending_migrations(MIGRATIONS).unwrap();
+        let database_url = database_url.to_owned();
+        let approval = approval.map(str::to_owned);
+        conn.spawn_blocking(move |conn| {
+            let pending = conn.pending_migrations(MIGRATIONS).unwrap();
+            let pending_versions = pending
+                .iter()
+                .map(|migration| migration.name().version().to_string())
+                .collect::<Vec<_>>();
+            let has_applied_migrations = !conn.applied_migrations().unwrap().is_empty();
+            require_migration_approval(
+                has_applied_migrations,
+                &pending_versions,
+                approval.as_deref(),
+            )
+            .unwrap_or_else(|message| panic!("{message}"));
+            if has_applied_migrations && !pending_versions.is_empty() {
+                back_up_sqlite_before_migration(
+                    conn,
+                    &database_url,
+                    pending_versions.last().unwrap(),
+                );
+            }
+            conn.run_migrations(&pending).unwrap();
             Ok(())
         })
         .await
@@ -150,11 +216,42 @@ async fn run_migrations(pool: &DbPool) {
     #[cfg(feature = "postgres")]
     {
         // must be spawned blocking, otherwise this would raise 'can call blocking only when running on the multi-threaded runtime': see https://github.com/rwf2/Rocket/pull/2648
+        let approval = approval.map(str::to_owned);
         actix_web::rt::task::spawn_blocking(move || {
             let mut harness = diesel_async::AsyncMigrationHarness::new(conn);
-            harness.run_pending_migrations(MIGRATIONS).unwrap();
+            let pending = harness.pending_migrations(MIGRATIONS).unwrap();
+            let pending_versions = pending
+                .iter()
+                .map(|migration| migration.name().version().to_string())
+                .collect::<Vec<_>>();
+            let has_applied_migrations = !harness.applied_migrations().unwrap().is_empty();
+            require_migration_approval(
+                has_applied_migrations,
+                &pending_versions,
+                approval.as_deref(),
+            )
+            .unwrap_or_else(|message| panic!("{message}"));
+            harness.run_migrations(&pending).unwrap();
         })
         .await
         .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::require_migration_approval;
+
+    #[test]
+    fn fresh_database_does_not_require_approval() {
+        assert!(require_migration_approval(false, &["20260721".to_owned()], None).is_ok());
+    }
+
+    #[test]
+    fn existing_database_requires_exact_pending_versions() {
+        let pending = ["20260721".to_owned(), "20260722".to_owned()];
+        assert!(require_migration_approval(true, &pending, None).is_err());
+        assert!(require_migration_approval(true, &pending, Some("20260721")).is_err());
+        assert!(require_migration_approval(true, &pending, Some("20260721,20260722")).is_ok());
     }
 }

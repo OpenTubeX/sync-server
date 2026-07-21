@@ -39,6 +39,7 @@ pub struct HealthResponse {
 pub struct EncryptedSyncManifest {
     pub collections: Vec<EncryptedSyncCollectionRevision>,
     pub legacy_data: bool,
+    pub legacy_encrypted_data: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

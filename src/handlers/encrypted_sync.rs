@@ -25,6 +25,14 @@ const COLLECTIONS: [&str; 7] = [
     "settings",
     "playlistBookmarks",
 ];
+const LEGACY_ENCRYPTED_COLLECTIONS: [&str; 6] = [
+    "subscriptions",
+    "playlists",
+    "history",
+    "playbackSpeeds",
+    "profiles",
+    "playlistBookmarks",
+];
 
 pub struct EncryptedSyncHandler {}
 
@@ -43,6 +51,7 @@ impl ScopedHandler for EncryptedSyncHandler {
                 .app_data(web::JsonConfig::default().limit(MAX_ENCRYPTED_SYNC_BYTES + 1024))
                 .wrap(actix_web::middleware::from_fn(auth_middleware))
                 .service(get_encrypted_sync_manifest)
+                .service(get_legacy_encrypted_sync)
                 .service(get_encrypted_sync_collection)
                 .service(put_encrypted_sync_collection),
         )
@@ -80,6 +89,16 @@ async fn get_encrypted_sync_manifest(
     let legacy_data = encrypted_sync::has_legacy_data(&mut conn, &account.id)
         .await
         .map_err(|_| HandlerError::InternalDatabaseError)?;
+    let has_all_migrated_collections = LEGACY_ENCRYPTED_COLLECTIONS.iter().all(|collection| {
+        documents
+            .iter()
+            .any(|document| document.collection == *collection)
+    });
+    let legacy_encrypted_data = !has_all_migrated_collections
+        && encrypted_sync::get_legacy_encrypted(&mut conn, &account.id)
+            .await
+            .map_err(|_| HandlerError::InternalDatabaseError)?
+            .is_some();
 
     Ok(web::Json(EncryptedSyncManifest {
         collections: documents
@@ -90,6 +109,32 @@ async fn get_encrypted_sync_manifest(
             })
             .collect(),
         legacy_data,
+        legacy_encrypted_data,
+    }))
+}
+
+#[utoipa::path(responses((status = OK, body = EncryptedSyncCollectionResponse)), security(("api_jwt_token" = [])))]
+#[get("/legacy")]
+async fn get_legacy_encrypted_sync(
+    account: Account,
+    pool: WebData,
+) -> HandlerResult<impl Responder> {
+    let mut conn = get_db_conn!(pool);
+    let document = encrypted_sync::get_legacy_encrypted(&mut conn, &account.id)
+        .await
+        .map_err(|_| HandlerError::InternalDatabaseError)?;
+
+    Ok(web::Json(match document {
+        Some(document) => EncryptedSyncCollectionResponse {
+            collection: "legacy".to_owned(),
+            revision: document.revision,
+            payload: Some(document.payload),
+        },
+        None => EncryptedSyncCollectionResponse {
+            collection: "legacy".to_owned(),
+            revision: 0,
+            payload: None,
+        },
     }))
 }
 

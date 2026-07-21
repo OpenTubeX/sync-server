@@ -47,6 +47,12 @@ There are two ways to configure `sync-server`
 | `secret_key`                    | Used to sign authentication tokens                   | None    | SomeVeryLongString64 |
 | `allow_registration`            | Whether to allow registering on this server          | `true`  | `false`              |
 | `validate_submitted_metadata`   | Whether to check incoming video data against YouTube | `true`  | `false`              |
+| `migration_approval`            | Exact comma-separated pending migration versions approved for an existing database after separately verifying a backup | None | `2026-07-21-180000-0000` |
+
+Existing databases never apply pending migrations implicitly. After you create and verify
+a separate backup, `migration_approval` must exactly match every pending version. SQLite
+also creates a consistent `*.pre-migration-<version>` backup immediately before changing
+the schema. Remove the approval after deployment so it cannot authorize a later migration.
 
 ## API Documentation
 - Start the app, e.g. with `cargo run`.

@@ -4,7 +4,18 @@ use diesel_async::{AsyncConnection, RunQueryDsl};
 use crate::DbConnection;
 use crate::database::DbError;
 use crate::models::EncryptedSync;
-use crate::schema::encrypted_sync::dsl::*;
+use crate::schema::encrypted_sync::dsl::{
+    account_id, collection, encrypted_sync, payload as encrypted_payload,
+    revision as encrypted_revision,
+};
+
+#[derive(QueryableByName)]
+pub struct LegacyEncryptedSync {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    pub revision: i64,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    pub payload: String,
+}
 
 pub async fn get_all(
     conn: &mut DbConnection,
@@ -33,9 +44,27 @@ pub async fn get(
 pub async fn exists(conn: &mut DbConnection, owner_id: &str) -> Result<bool, DbError> {
     use diesel::dsl::exists as query_exists;
 
-    diesel::select(query_exists(encrypted_sync.filter(account_id.eq(owner_id))))
+    if diesel::select(query_exists(encrypted_sync.filter(account_id.eq(owner_id))))
         .get_result(conn)
-        .await
+        .await?
+    {
+        return Ok(true);
+    }
+
+    Ok(get_legacy_encrypted(conn, owner_id).await?.is_some())
+}
+
+pub async fn get_legacy_encrypted(
+    conn: &mut DbConnection,
+    owner_id: &str,
+) -> Result<Option<LegacyEncryptedSync>, DbError> {
+    diesel::sql_query(
+        "SELECT revision, payload FROM encrypted_sync_single_document WHERE account_id = ?",
+    )
+    .bind::<diesel::sql_types::Text, _>(owner_id)
+    .get_result(conn)
+    .await
+    .optional()
 }
 
 pub async fn create(conn: &mut DbConnection, document: &EncryptedSync) -> Result<(), DbError> {
@@ -193,9 +222,12 @@ pub async fn replace(
         encrypted_sync
             .filter(account_id.eq(owner_id))
             .filter(collection.eq(collection_name))
-            .filter(revision.eq(expected_revision)),
+            .filter(encrypted_revision.eq(expected_revision)),
     )
-    .set((revision.eq(expected_revision + 1), payload.eq(new_payload)))
+    .set((
+        encrypted_revision.eq(expected_revision + 1),
+        encrypted_payload.eq(new_payload),
+    ))
     .execute(conn)
     .await?;
     Ok(updated == 1)

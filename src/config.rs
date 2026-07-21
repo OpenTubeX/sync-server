@@ -13,6 +13,8 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub validate_submitted_metadata: bool,
     pub database_url: String,
+    #[serde(default)]
+    pub migration_approval: Option<String>,
 }
 
 pub fn build_config() -> Result<Config, ConfigError> {
