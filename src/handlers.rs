@@ -58,9 +58,9 @@ pub enum HandlerError {
     ValidationError,
     #[error("provided metadata seems to be wrong: {0}")]
     ValidationErrorWithContext(String),
-    #[error("encrypted sync document changed; retry with the latest revision")]
+    #[error("encrypted sync collection changed; retry with the latest revision")]
     EncryptedSyncConflict,
-    #[error("encrypted sync document is too large")]
+    #[error("encrypted sync collection is too large")]
     EncryptedSyncTooLarge,
     #[error("this account requires the encrypted sync endpoint")]
     EncryptedSyncRequired,

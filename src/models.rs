@@ -81,10 +81,12 @@ pub struct ChannelPlaybackSpeed {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Queryable, Selectable, Insertable, ToSchema)]
+#[diesel(primary_key(account_id, collection))]
 #[diesel(belongs_to(Account))]
 #[diesel(table_name = encrypted_sync)]
 pub struct EncryptedSync {
     pub account_id: String,
+    pub collection: String,
     pub revision: i64,
     pub payload: String,
 }

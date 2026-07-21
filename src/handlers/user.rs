@@ -170,15 +170,19 @@ pub async fn auth_middleware(
         return Err(HandlerError::AccountNotExists.into());
     };
 
-    let encrypted_endpoint = req.path().ends_with("/encrypted_sync");
+    let encrypted_endpoint = req.path().contains("/encrypted_sync");
     let account_deletion = req.path().ends_with("/account/delete");
     if !encrypted_endpoint && !account_deletion {
-        let encrypted_sync_enabled = encrypted_sync::get(&mut conn, &account.id)
+        let encrypted_sync_enabled = encrypted_sync::exists(&mut conn, &account.id)
             .await
-            .map_err(|_| HandlerError::InternalDatabaseError)?
-            .is_some();
+            .map_err(|_| HandlerError::InternalDatabaseError)?;
         if encrypted_sync_enabled {
-            return Err(HandlerError::EncryptedSyncRequired.into());
+            let migration_complete = !encrypted_sync::has_legacy_data(&mut conn, &account.id)
+                .await
+                .map_err(|_| HandlerError::InternalDatabaseError)?;
+            if migration_complete {
+                return Err(HandlerError::EncryptedSyncRequired.into());
+            }
         }
     }
 

@@ -1,8 +1,9 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
-    encrypted_sync (account_id) {
+    encrypted_sync (account_id, collection) {
         account_id -> Text,
+        collection -> Text,
         revision -> BigInt,
         payload -> Text,
     }

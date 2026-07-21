@@ -63,12 +63,15 @@ For example:
 ### Enhanced privacy sync
 
 `GET /health` returns the server's capabilities alongside its health status.
-Authenticated clients read and replace their opaque document through `GET` and `PUT`
-`/v1/encrypted_sync`. Updates use the returned revision and fail with HTTP 409
-if another client replaced the document first. The server never receives the
-privacy passphrase or plaintext sync content. When no encrypted document exists,
-the response's `legacy_data` flag tells the client to pull and merge the old
-plaintext records before performing the first encrypted upload.
+Authenticated clients read the collection manifest from `GET /v1/encrypted_sync`
+and transfer individual opaque collections through `GET` and `PUT`
+`/v1/encrypted_sync/{collection}`. Each collection has an independent revision;
+an update with a stale revision fails with HTTP 409 without blocking unrelated
+collections. The server never receives the privacy passphrase or plaintext sync
+content. Before the first encrypted collection is uploaded, the manifest's
+`legacy_data` flag tells the client to pull and merge the old plaintext records.
+Each legacy domain is removed transactionally only after its matching encrypted
+collection is stored, so an interrupted migration can safely resume.
 
 ## Developing
 ### Adding New Database Objects or Altering Tables

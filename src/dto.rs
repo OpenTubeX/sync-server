@@ -36,10 +36,22 @@ pub struct HealthResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct EncryptedSyncResponse {
+pub struct EncryptedSyncManifest {
+    pub collections: Vec<EncryptedSyncCollectionRevision>,
+    pub legacy_data: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EncryptedSyncCollectionRevision {
+    pub collection: String,
+    pub revision: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EncryptedSyncCollectionResponse {
+    pub collection: String,
     pub revision: i64,
     pub payload: Option<String>,
-    pub legacy_data: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

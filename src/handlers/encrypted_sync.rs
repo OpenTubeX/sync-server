@@ -6,13 +6,25 @@ use utoipa_actix_web::scope;
 
 use crate::database::encrypted_sync;
 use crate::database::watch_history::MAX_PAGE_SIZE;
-use crate::dto::{EncryptedSyncResponse, PutEncryptedSync, SyncCapabilities};
+use crate::dto::{
+    EncryptedSyncCollectionResponse, EncryptedSyncCollectionRevision, EncryptedSyncManifest,
+    PutEncryptedSync, SyncCapabilities,
+};
 use crate::handlers::user::auth_middleware;
 use crate::handlers::{HandlerError, HandlerResult, ScopedHandler};
 use crate::models::{Account, EncryptedSync};
 use crate::{WebData, get_db_conn};
 
 const MAX_ENCRYPTED_SYNC_BYTES: usize = 64 * 1024 * 1024;
+const COLLECTIONS: [&str; 7] = [
+    "subscriptions",
+    "playlists",
+    "history",
+    "playbackSpeeds",
+    "profiles",
+    "settings",
+    "playlistBookmarks",
+];
 
 pub struct EncryptedSyncHandler {}
 
@@ -30,8 +42,9 @@ impl ScopedHandler for EncryptedSyncHandler {
             scope::scope("/encrypted_sync")
                 .app_data(web::JsonConfig::default().limit(MAX_ENCRYPTED_SYNC_BYTES + 1024))
                 .wrap(actix_web::middleware::from_fn(auth_middleware))
-                .service(get_encrypted_sync)
-                .service(put_encrypted_sync),
+                .service(get_encrypted_sync_manifest)
+                .service(get_encrypted_sync_collection)
+                .service(put_encrypted_sync_collection),
         )
     }
 }
@@ -44,38 +57,80 @@ pub(crate) fn sync_capabilities() -> SyncCapabilities {
     }
 }
 
-#[utoipa::path(responses((status = OK, body = EncryptedSyncResponse)), security(("api_jwt_token" = [])))]
+fn validate_collection(collection: &str) -> HandlerResult<()> {
+    if COLLECTIONS.contains(&collection) {
+        Ok(())
+    } else {
+        Err(HandlerError::ValidationErrorWithContext(
+            "unknown encrypted sync collection".to_owned(),
+        ))
+    }
+}
+
+#[utoipa::path(responses((status = OK, body = EncryptedSyncManifest)), security(("api_jwt_token" = [])))]
 #[get("")]
-async fn get_encrypted_sync(account: Account, pool: WebData) -> HandlerResult<impl Responder> {
+async fn get_encrypted_sync_manifest(
+    account: Account,
+    pool: WebData,
+) -> HandlerResult<impl Responder> {
     let mut conn = get_db_conn!(pool);
-    let document = encrypted_sync::get(&mut conn, &account.id)
+    let documents = encrypted_sync::get_all(&mut conn, &account.id)
         .await
         .map_err(|_| HandlerError::InternalDatabaseError)?;
     let legacy_data = encrypted_sync::has_legacy_data(&mut conn, &account.id)
         .await
         .map_err(|_| HandlerError::InternalDatabaseError)?;
 
+    Ok(web::Json(EncryptedSyncManifest {
+        collections: documents
+            .into_iter()
+            .map(|document| EncryptedSyncCollectionRevision {
+                collection: document.collection,
+                revision: document.revision,
+            })
+            .collect(),
+        legacy_data,
+    }))
+}
+
+#[utoipa::path(responses((status = OK, body = EncryptedSyncCollectionResponse)), security(("api_jwt_token" = [])))]
+#[get("/{collection}")]
+async fn get_encrypted_sync_collection(
+    account: Account,
+    pool: WebData,
+    collection: web::Path<String>,
+) -> HandlerResult<impl Responder> {
+    let collection = collection.into_inner();
+    validate_collection(&collection)?;
+    let mut conn = get_db_conn!(pool);
+    let document = encrypted_sync::get(&mut conn, &account.id, &collection)
+        .await
+        .map_err(|_| HandlerError::InternalDatabaseError)?;
+
     Ok(web::Json(match document {
-        Some(document) => EncryptedSyncResponse {
+        Some(document) => EncryptedSyncCollectionResponse {
+            collection,
             revision: document.revision,
             payload: Some(document.payload),
-            legacy_data,
         },
-        None => EncryptedSyncResponse {
+        None => EncryptedSyncCollectionResponse {
+            collection,
             revision: 0,
             payload: None,
-            legacy_data,
         },
     }))
 }
 
-#[utoipa::path(request_body = PutEncryptedSync, responses((status = OK, body = EncryptedSyncResponse)), security(("api_jwt_token" = [])))]
-#[put("")]
-async fn put_encrypted_sync(
+#[utoipa::path(request_body = PutEncryptedSync, responses((status = OK, body = EncryptedSyncCollectionResponse)), security(("api_jwt_token" = [])))]
+#[put("/{collection}")]
+async fn put_encrypted_sync_collection(
     account: Account,
     pool: WebData,
+    collection: web::Path<String>,
     form: web::Json<PutEncryptedSync>,
 ) -> HandlerResult<impl Responder> {
+    let collection = collection.into_inner();
+    validate_collection(&collection)?;
     if form.payload.len() > MAX_ENCRYPTED_SYNC_BYTES {
         return Err(HandlerError::EncryptedSyncTooLarge);
     }
@@ -85,10 +140,11 @@ async fn put_encrypted_sync(
     let saved = if form.revision == 0 {
         let document = EncryptedSync {
             account_id: account.id.clone(),
+            collection: collection.clone(),
             revision: next_revision,
             payload: form.payload.clone(),
         };
-        encrypted_sync::create_and_clear_legacy(&mut conn, &document)
+        encrypted_sync::create_initial(&mut conn, &document)
             .await
             .map(|_| true)
             .or_else(|error| match error {
@@ -98,7 +154,14 @@ async fn put_encrypted_sync(
                 error => Err(error),
             })
     } else {
-        encrypted_sync::replace(&mut conn, &account.id, form.revision, &form.payload).await
+        encrypted_sync::replace(
+            &mut conn,
+            &account.id,
+            &collection,
+            form.revision,
+            &form.payload,
+        )
+        .await
     }
     .map_err(|_| HandlerError::InternalDatabaseError)?;
 
@@ -106,9 +169,9 @@ async fn put_encrypted_sync(
         return Err(HandlerError::EncryptedSyncConflict);
     }
 
-    Ok(HttpResponse::Ok().json(EncryptedSyncResponse {
+    Ok(HttpResponse::Ok().json(EncryptedSyncCollectionResponse {
+        collection,
         revision: next_revision,
         payload: None,
-        legacy_data: false,
     }))
 }
