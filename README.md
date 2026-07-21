@@ -62,8 +62,8 @@ For example:
 
 ### Enhanced privacy sync
 
-`GET /v1/capabilities` advertises encrypted sync version `1`. Authenticated
-clients read and replace their opaque document through `GET` and `PUT`
+`GET /health` returns the server's capabilities alongside its health status.
+Authenticated clients read and replace their opaque document through `GET` and `PUT`
 `/v1/encrypted_sync`. Updates use the returned revision and fail with HTTP 409
 if another client replaced the document first. The server never receives the
 privacy passphrase or plaintext sync content. When no encrypted document exists,

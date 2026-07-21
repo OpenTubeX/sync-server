@@ -26,7 +26,7 @@ impl ScopedHandler for EncryptedSyncHandler {
             Error = actix_web::Error,
         >,
     > {
-        scope::scope("").service(capabilities).service(
+        scope::scope("").service(
             scope::scope("/encrypted_sync")
                 .app_data(web::JsonConfig::default().limit(MAX_ENCRYPTED_SYNC_BYTES + 1024))
                 .wrap(actix_web::middleware::from_fn(auth_middleware))
@@ -36,14 +36,12 @@ impl ScopedHandler for EncryptedSyncHandler {
     }
 }
 
-#[utoipa::path(responses((status = OK, body = SyncCapabilities)))]
-#[get("/capabilities")]
-async fn capabilities() -> impl Responder {
-    web::Json(SyncCapabilities {
+pub(crate) fn sync_capabilities() -> SyncCapabilities {
+    SyncCapabilities {
         encrypted_sync: 1,
         bulk_sync: 1,
         history_page_size: MAX_PAGE_SIZE,
-    })
+    }
 }
 
 #[utoipa::path(responses((status = OK, body = EncryptedSyncResponse)), security(("api_jwt_token" = [])))]

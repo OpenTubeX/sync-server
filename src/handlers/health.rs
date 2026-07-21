@@ -1,7 +1,8 @@
-use actix_web::{Responder, routes};
+use actix_web::{Responder, routes, web};
 use utoipa_actix_web::scope;
 
-use crate::handlers::ScopedHandler;
+use crate::dto::HealthResponse;
+use crate::handlers::{ScopedHandler, encrypted_sync::sync_capabilities};
 
 pub struct HealthHandler {}
 impl ScopedHandler for HealthHandler {
@@ -18,11 +19,14 @@ impl ScopedHandler for HealthHandler {
     }
 }
 
-#[utoipa::path(responses((status = OK, body = String)))]
+#[utoipa::path(responses((status = OK, body = HealthResponse)))]
 #[routes]
 #[get("/")]
 #[get("/health")]
 #[get("/healthz")]
 async fn health_state() -> impl Responder {
-    "OK"
+    web::Json(HealthResponse {
+        status: "ok".to_owned(),
+        capabilities: sync_capabilities(),
+    })
 }

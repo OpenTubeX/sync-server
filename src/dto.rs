@@ -30,6 +30,12 @@ pub struct SyncCapabilities {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct HealthResponse {
+    pub status: String,
+    pub capabilities: SyncCapabilities,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EncryptedSyncResponse {
     pub revision: i64,
     pub payload: Option<String>,
