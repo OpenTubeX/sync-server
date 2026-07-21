@@ -1,3 +1,3 @@
 # ytrss
 
-Crate for reading the youtube rss api. Currently only used for validation in Libretube `sync-server`
+Crate for reading the YouTube RSS API. Currently only used for validation in the OpenTubeX sync server.

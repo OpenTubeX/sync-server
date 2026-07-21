@@ -1793,35 +1793,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "libretube-sync"
-version = "0.1.0"
-dependencies = [
- "actix-rt",
- "actix-web",
- "argon2",
- "config",
- "diesel",
- "diesel-async",
- "diesel_migrations",
- "env_logger",
- "hmac 0.13.0",
- "itertools",
- "jsonwebtoken",
- "libsqlite3-sys",
- "log",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "thiserror",
- "url",
- "utoipa",
- "utoipa-actix-web",
- "utoipa-scalar",
- "uuid",
- "ytrss",
-]
-
-[[package]]
 name = "libsqlite3-sys"
 version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2020,6 +1991,35 @@ name = "openssl-probe"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
+
+[[package]]
+name = "opentubex-sync"
+version = "0.1.0"
+dependencies = [
+ "actix-rt",
+ "actix-web",
+ "argon2",
+ "config",
+ "diesel",
+ "diesel-async",
+ "diesel_migrations",
+ "env_logger",
+ "hmac 0.13.0",
+ "itertools",
+ "jsonwebtoken",
+ "libsqlite3-sys",
+ "log",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror",
+ "url",
+ "utoipa",
+ "utoipa-actix-web",
+ "utoipa-scalar",
+ "uuid",
+ "ytrss",
+]
 
 [[package]]
 name = "p256"

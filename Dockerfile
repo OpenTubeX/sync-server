@@ -22,7 +22,7 @@ WORKDIR /app
 # required for connecting to YouTube for input data validation
 RUN apk add ca-certificates
 
-COPY --from=builder /app/target/release/libretube-sync /app/libretube-sync-server
+COPY --from=builder /app/target/release/opentubex-sync /app/opentubex-sync-server
 
 EXPOSE 8080
-CMD ["./libretube-sync-server"]
+CMD ["./opentubex-sync-server"]

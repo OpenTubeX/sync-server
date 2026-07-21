@@ -5,10 +5,10 @@ license = "AGPL-3.0-or-later"
 
 # Main crate
 [package]
-name = "libretube-sync"
+name = "opentubex-sync"
 version.workspace = true
 edition = "2024"
-description = "Server to sync user data (subscriptions, playlists, ...) between devices, written for LibreTube"
+description = "Server to synchronize OpenTubeX data between devices"
 license.workspace = true
 
 [dependencies]
