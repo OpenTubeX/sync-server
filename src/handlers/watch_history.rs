@@ -34,12 +34,51 @@ impl ScopedHandler for WatchHistoryHandler {
         scope::scope("/watch_history")
             .wrap(from_fn(auth_middleware))
             .service(get_watch_history)
+            .service(add_to_watch_history_bulk)
             .service(get_from_watch_history)
             .service(add_to_watch_history)
             .service(update_watch_history_video_state)
             .service(remove_from_watch_history)
             .service(clear_watch_history)
     }
+}
+
+async fn store_watch_history_item(
+    conn: &mut crate::DbConnection,
+    account_id: &str,
+    mut item: ExtendedWatchHistoryItem,
+) -> HandlerResult<ExtendedWatchHistoryItem> {
+    item.metadata.account_id = account_id.to_string();
+    item.metadata.video_id = item.video.id.clone();
+
+    validate_video_information_if_changed_single(conn, &mut item.video).await?;
+    create_or_update_channel(conn, &item.video.uploader)
+        .await
+        .map_err(|_| HandlerError::InternalDatabaseError)?;
+    create_or_update_video(conn, &(&item.video).into())
+        .await
+        .map_err(|_| HandlerError::InternalDatabaseError)?;
+    add_or_update_video_to_watch_history(conn, &item.metadata)
+        .await
+        .map_err(|_| HandlerError::InternalDatabaseError)?;
+
+    Ok(item)
+}
+
+#[utoipa::path(responses((status = OK)), security(("api_jwt_token" = [])))]
+#[put("/bulk")]
+async fn add_to_watch_history_bulk(
+    account: Account,
+    pool: WebData,
+    items: web::Json<Vec<ExtendedWatchHistoryItem>>,
+) -> HandlerResult<impl Responder> {
+    let mut conn = get_db_conn!(pool);
+
+    for item in items.into_inner() {
+        store_watch_history_item(&mut conn, &account.id, item).await?;
+    }
+
+    Ok(HttpResponse::Ok())
 }
 
 #[derive(Deserialize, Eq, PartialEq, PartialOrd, Ord)]
@@ -126,24 +165,8 @@ async fn add_to_watch_history(
 ) -> HandlerResult<impl Responder> {
     let mut conn = get_db_conn!(pool);
 
-    let mut watch_history_item = watch_history_item.into_inner();
-    watch_history_item.metadata.account_id = account.id;
-    watch_history_item.metadata.video_id = watch_history_item.video.id.clone();
-
-    validate_video_information_if_changed_single(&mut conn, &mut watch_history_item.video).await?;
-
-    // store video metadata in database
-    create_or_update_channel(&mut conn, &watch_history_item.video.uploader)
-        .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?;
-    create_or_update_video(&mut conn, &(&watch_history_item.video).into())
-        .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?;
-
-    // create actual watch history entry
-    add_or_update_video_to_watch_history(&mut conn, &watch_history_item.metadata)
-        .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?;
+    let watch_history_item =
+        store_watch_history_item(&mut conn, &account.id, watch_history_item.into_inner()).await?;
 
     Ok(HttpResponse::Ok().json(watch_history_item))
 }

@@ -103,7 +103,14 @@ async fn main() -> io::Result<()> {
 /// See more: <https://docs.rs/diesel-async/latest/diesel_async/pooled_connection/index.html#modules>.
 async fn initialize_db_pool(db_url: &str) -> Result<DbPool, PoolError> {
     let connection_manager = AsyncDieselConnectionManager::<DbConnection>::new(db_url);
-    Pool::builder().build(connection_manager).await
+    let pool = Pool::builder();
+
+    // SQLite only permits one writer at a time. Serializing access here avoids
+    // transient "database is locked" failures when multiple clients sync.
+    #[cfg(feature = "sqlite")]
+    let pool = pool.max_size(1);
+
+    pool.build(connection_manager).await
 }
 
 async fn run_migrations(pool: &DbPool) {

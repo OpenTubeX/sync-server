@@ -47,6 +47,7 @@ impl ScopedHandler for SubscriptionsHandler {
                     .service(remove_from_subscription_group),
             )
             .service(get_subscriptions)
+            .service(subscribe_bulk)
             .service(get_subscription)
             .service(subscribe)
             .service(unsubscribe)
@@ -63,6 +64,25 @@ async fn get_subscriptions(account: Account, pool: WebData) -> HandlerResult<imp
         .map_err(|_| HandlerError::InternalDatabaseError)?;
 
     Ok(HttpResponse::Ok().json(subscriptions))
+}
+
+#[utoipa::path(responses((status = OK)), security(("api_jwt_token" = [])))]
+#[put("/bulk")]
+async fn subscribe_bulk(
+    account: Account,
+    pool: WebData,
+    channels: web::Json<Vec<Channel>>,
+) -> HandlerResult<impl Responder> {
+    let mut conn = get_db_conn!(pool);
+
+    for mut channel in channels.into_inner() {
+        validate_channel_information_if_changed(&mut conn, &mut channel).await?;
+        add_subscription_by_account_id(&mut conn, &channel, &account.id)
+            .await
+            .map_err(|err| HandlerError::InternalDatabaseErrorWithContext(err.to_string()))?;
+    }
+
+    Ok(HttpResponse::Ok())
 }
 
 #[utoipa::path(responses((status = OK, body = Channel)), security(("api_jwt_token" = [])))]
