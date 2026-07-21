@@ -1,6 +1,14 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
+    encrypted_sync (account_id) {
+        account_id -> Text,
+        revision -> BigInt,
+        payload -> Text,
+    }
+}
+
+diesel::table! {
     account (id) {
         id -> Text,
         name_hash -> Text,
@@ -106,6 +114,7 @@ diesel::table! {
 
 diesel::joinable!(playlist -> account (account_id));
 diesel::joinable!(channel_playback_speed -> account (account_id));
+diesel::joinable!(encrypted_sync -> account (account_id));
 diesel::joinable!(playlist_bookmark -> account (account_id));
 diesel::joinable!(playlist_bookmark -> public_playlist (public_playlist_id));
 diesel::joinable!(playlist_video_member -> account (account_id));
@@ -124,6 +133,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     account,
     channel,
     channel_playback_speed,
+    encrypted_sync,
     playlist,
     playlist_bookmark,
     playlist_video_member,

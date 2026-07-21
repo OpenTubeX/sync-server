@@ -10,6 +10,7 @@ use crate::auth::{generate_jwt, hash_accountname, hash_password, verify_jwt, ver
 use crate::database::account::{
     delete_existing_account, find_account_by_id, find_account_by_name_hash, insert_new_account,
 };
+use crate::database::encrypted_sync;
 use crate::dto::LoginResponse;
 use crate::handlers::{HandlerError, HandlerResult, ScopedHandler};
 use crate::models::Account;
@@ -168,6 +169,18 @@ pub async fn auth_middleware(
     else {
         return Err(HandlerError::AccountNotExists.into());
     };
+
+    let encrypted_endpoint = req.path().ends_with("/encrypted_sync");
+    let account_deletion = req.path().ends_with("/account/delete");
+    if !encrypted_endpoint && !account_deletion {
+        let encrypted_sync_enabled = encrypted_sync::get(&mut conn, &account.id)
+            .await
+            .map_err(|_| HandlerError::InternalDatabaseError)?
+            .is_some();
+        if encrypted_sync_enabled {
+            return Err(HandlerError::EncryptedSyncRequired.into());
+        }
+    }
 
     // Do not hold a pooled connection while the endpoint acquires its own.
     drop(conn);

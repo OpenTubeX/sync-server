@@ -1,6 +1,19 @@
 # OpenTubeX Sync Server
 Server to synchronize OpenTubeX data between devices, including subscriptions, playlists, watch history, and channel playback speeds.
 
+OpenTubeX clients can use the encrypted sync API exposed by this server. In
+that mode all synchronized content is encrypted on the client with a separate
+privacy passphrase and the server stores one opaque, revisioned document per
+account. Documents are padded in 64 KiB blocks to reduce size leakage. The
+operator can still observe account activity, IP addresses, request timing, and
+approximate encrypted document size, but cannot read its contents.
+LibreTube-compatible plaintext endpoints remain available for older clients.
+When an account uploads its first encrypted document, its account-linked
+legacy plaintext sync records are removed. This cannot erase server backups
+that may already exist. After that first upload, plaintext sync endpoints are
+rejected for the account so an older client cannot accidentally repopulate
+readable data.
+
 This project is based on the [LibreTube sync server](https://github.com/libre-tube/sync-server).
 
 ## Running
@@ -46,6 +59,16 @@ This `jwt` must be passed either as `Authorization` cookie or header for authent
 For example:
 - Header: `Authorization: abcdefghijklmnopqrtuvwxyz`
 - Cookie: `Authorization=abcdefghijklmnopqrtuvwxyz`
+
+### Enhanced privacy sync
+
+`GET /v1/capabilities` advertises encrypted sync version `1`. Authenticated
+clients read and replace their opaque document through `GET` and `PUT`
+`/v1/encrypted_sync`. Updates use the returned revision and fail with HTTP 409
+if another client replaced the document first. The server never receives the
+privacy passphrase or plaintext sync content. When no encrypted document exists,
+the response's `legacy_data` flag tells the client to pull and merge the old
+plaintext records before performing the first encrypted upload.
 
 ## Developing
 ### Adding New Database Objects or Altering Tables

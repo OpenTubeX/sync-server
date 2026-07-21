@@ -1,6 +1,7 @@
 pub mod account;
 pub mod channel;
 pub mod channel_playback_speed;
+pub mod encrypted_sync;
 pub mod playlist;
 pub mod playlist_bookmark;
 pub mod public_playlist;

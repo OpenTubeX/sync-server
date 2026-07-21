@@ -12,6 +12,7 @@ use utoipa_actix_web::scope::Scope;
 use crate::models::Account;
 
 pub mod channel_playback_speeds;
+pub mod encrypted_sync;
 pub mod health;
 pub mod playlist_bookmarks;
 pub mod playlists;
@@ -57,6 +58,12 @@ pub enum HandlerError {
     ValidationError,
     #[error("provided metadata seems to be wrong: {0}")]
     ValidationErrorWithContext(String),
+    #[error("encrypted sync document changed; retry with the latest revision")]
+    EncryptedSyncConflict,
+    #[error("encrypted sync document is too large")]
+    EncryptedSyncTooLarge,
+    #[error("this account requires the encrypted sync endpoint")]
+    EncryptedSyncRequired,
     #[error("failed to load data from YouTube")]
     YouTubeConnectError,
 }
@@ -82,6 +89,9 @@ impl ResponseError for HandlerError {
             Self::InternalDatabaseErrorWithContext(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ValidationError => StatusCode::BAD_REQUEST,
             Self::ValidationErrorWithContext(_) => StatusCode::BAD_REQUEST,
+            Self::EncryptedSyncConflict => StatusCode::CONFLICT,
+            Self::EncryptedSyncTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::EncryptedSyncRequired => StatusCode::CONFLICT,
             Self::YouTubeConnectError => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }

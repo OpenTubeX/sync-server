@@ -22,6 +22,24 @@ pub struct LoginResponse {
     pub jwt: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SyncCapabilities {
+    pub encrypted_sync: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EncryptedSyncResponse {
+    pub revision: i64,
+    pub payload: Option<String>,
+    pub legacy_data: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PutEncryptedSync {
+    pub revision: i64,
+    pub payload: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct DeleteUser {
     pub password: String,
