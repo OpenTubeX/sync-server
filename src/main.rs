@@ -4,7 +4,11 @@ extern crate diesel;
 use std::{io, sync::LazyLock};
 
 use actix_web::{App, HttpServer, middleware, web};
+#[cfg(feature = "sqlite")]
+use diesel_async::pooled_connection::ManagerConfig;
 use diesel_async::pooled_connection::{AsyncDieselConnectionManager, PoolError, bb8::Pool};
+#[cfg(feature = "sqlite")]
+use diesel_async::{AsyncConnection, SimpleAsyncConnection};
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 use log::error;
 use utoipa::OpenApi;
@@ -102,15 +106,28 @@ async fn main() -> io::Result<()> {
 ///
 /// See more: <https://docs.rs/diesel-async/latest/diesel_async/pooled_connection/index.html#modules>.
 async fn initialize_db_pool(db_url: &str) -> Result<DbPool, PoolError> {
-    let connection_manager = AsyncDieselConnectionManager::<DbConnection>::new(db_url);
-    let pool = Pool::builder();
-
-    // SQLite only permits one writer at a time. Serializing access here avoids
-    // transient "database is locked" failures when multiple clients sync.
     #[cfg(feature = "sqlite")]
-    let pool = pool.max_size(1);
+    let connection_manager = {
+        let mut manager_config = ManagerConfig::default();
+        manager_config.custom_setup = Box::new(|url| {
+            let url = url.to_owned();
+            Box::pin(async move {
+                let mut conn = DbConnection::establish(&url).await?;
+                conn.batch_execute(
+                    "PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 30000; PRAGMA synchronous = NORMAL;",
+                )
+                .await
+                .map_err(|err| diesel::ConnectionError::BadConnection(err.to_string()))?;
+                Ok(conn)
+            })
+        });
+        AsyncDieselConnectionManager::<DbConnection>::new_with_config(db_url, manager_config)
+    };
 
-    pool.build(connection_manager).await
+    #[cfg(feature = "postgres")]
+    let connection_manager = AsyncDieselConnectionManager::<DbConnection>::new(db_url);
+
+    Pool::builder().build(connection_manager).await
 }
 
 async fn run_migrations(pool: &DbPool) {

@@ -169,6 +169,9 @@ pub async fn auth_middleware(
         return Err(HandlerError::AccountNotExists.into());
     };
 
+    // Do not hold a pooled connection while the endpoint acquires its own.
+    drop(conn);
+
     // append account to request extensions so that it can be accessed with
     // `req.extensions().get::<User>()` by handlers
     req.extensions_mut().insert(account);
