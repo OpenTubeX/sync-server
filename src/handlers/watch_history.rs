@@ -273,7 +273,11 @@ async fn add_to_watch_history(
         store_watch_history_items(&pool, &account.id, vec![watch_history_item.into_inner()])
             .await?;
 
-    Ok(HttpResponse::Ok().json(stored.pop()))
+    // One item in, one item out. Answering `200 null` if that ever stops holding
+    // would be a silently wrong response, so make it an error instead.
+    let stored = stored.pop().ok_or(HandlerError::InternalDatabaseError)?;
+
+    Ok(HttpResponse::Ok().json(stored))
 }
 
 #[utoipa::path(responses((status = OK)), security(("api_jwt_token" = [])))]

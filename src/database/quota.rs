@@ -62,14 +62,12 @@ pub async fn count_playback_speeds(
         .await
 }
 
-/// Whether storing `incoming` further rows would exceed the per-table quota.
+/// Whether an account holds more rows than the per-table quota allows.
 ///
-/// `incoming` is an upper bound: some of those rows may be updates to existing
-/// ones, so this can reject slightly early at the very top of the range.
-pub fn exceeds_row_quota(stored_rows: i64, incoming: usize) -> bool {
-    let incoming = i64::try_from(incoming).unwrap_or(i64::MAX);
-
-    stored_rows.saturating_add(incoming) > MAX_ROWS_PER_ACCOUNT
+/// Callers check the rows that actually exist rather than predicting how many a
+/// batch will add, because every bulk write path is an upsert.
+pub fn exceeds_row_quota(stored_rows: i64) -> bool {
+    stored_rows > MAX_ROWS_PER_ACCOUNT
 }
 
 #[cfg(test)]
@@ -78,14 +76,10 @@ mod tests {
 
     #[test]
     fn quota_allows_up_to_the_limit() {
-        assert!(!exceeds_row_quota(0, 1));
-        assert!(!exceeds_row_quota(MAX_ROWS_PER_ACCOUNT - 1, 1));
-        assert!(exceeds_row_quota(MAX_ROWS_PER_ACCOUNT, 1));
-    }
-
-    #[test]
-    fn quota_does_not_overflow_on_absurd_batches() {
-        assert!(exceeds_row_quota(i64::MAX, usize::MAX));
-        assert!(exceeds_row_quota(0, usize::MAX));
+        assert!(!exceeds_row_quota(0));
+        assert!(!exceeds_row_quota(MAX_ROWS_PER_ACCOUNT - 1));
+        assert!(!exceeds_row_quota(MAX_ROWS_PER_ACCOUNT));
+        assert!(exceeds_row_quota(MAX_ROWS_PER_ACCOUNT + 1));
+        assert!(exceeds_row_quota(i64::MAX));
     }
 }

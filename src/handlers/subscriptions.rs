@@ -167,12 +167,25 @@ async fn subscribe(
     }
 
     let mut conn = get_db_conn!(pool);
-    match add_subscription_by_account_id(&mut conn, &channel, &account.id).await {
-        Ok(_) => Ok(HttpResponse::Ok()),
-        Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
-            err.to_string(),
-        )),
-    }
+    // Mirrors the bulk path: without an authoritative post-write check inside a
+    // transaction, concurrent single subscribes each see an under-quota count and
+    // can together push the account past the limit.
+    conn.transaction::<_, HandlerError, _>(|conn| {
+        let (channel, account_id) = (&channel, &account.id);
+        async move {
+            add_subscription_by_account_id(conn, channel, account_id).await?;
+            check_stored_rows(
+                count_subscriptions(conn, account_id)
+                    .await
+                    .map_err(|_| HandlerError::InternalDatabaseError)?,
+            )?;
+            Ok(())
+        }
+        .scope_boxed()
+    })
+    .await?;
+
+    Ok(HttpResponse::Ok())
 }
 
 #[utoipa::path(responses((status = OK)), security(("api_jwt_token" = [])))]

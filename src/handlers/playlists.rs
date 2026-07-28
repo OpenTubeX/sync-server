@@ -244,6 +244,12 @@ async fn add_to_playlist(
     conn.transaction::<_, HandlerError, _>(|conn| {
         let (groups, playlist_id, account_id) = (&groups, &*playlist_id, &account.id);
         async move {
+            // Re-check ownership: the earlier check happened before the RSS
+            // round-trips, which can take seconds, so the playlist may have been
+            // deleted since. Without this the inserts fail as an opaque database
+            // error instead of PlaylistNotExists.
+            get_owned_playlist_or_error(conn, playlist_id, account_id).await?;
+
             for (channel, videos) in groups {
                 // store channel information first before storing video to ensure data integrity
                 create_or_update_channel(conn, channel)

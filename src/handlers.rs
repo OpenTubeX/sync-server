@@ -142,7 +142,7 @@ pub fn check_already_over_quota(stored_rows: i64) -> HandlerResult<()> {
 /// incoming entries were updates rather than inserts. Returning an error from
 /// inside the transaction rolls the writes back.
 pub fn check_stored_rows(stored_rows: i64) -> HandlerResult<()> {
-    if crate::database::quota::exceeds_row_quota(stored_rows, 0) {
+    if crate::database::quota::exceeds_row_quota(stored_rows) {
         return Err(HandlerError::StorageQuotaExceeded);
     }
 

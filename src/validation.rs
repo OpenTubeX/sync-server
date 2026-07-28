@@ -31,6 +31,11 @@ fn verify_image_url(image_url: &str) -> bool {
         return false;
     };
 
+    // Clients load these URLs, so do not store plaintext or exotic schemes.
+    if url.scheme() != "https" {
+        return false;
+    }
+
     let Some(host) = url.host_str() else {
         return false;
     };
@@ -143,7 +148,11 @@ pub async fn validate_channel_against_youtube(channel: &mut Channel) -> HandlerR
         .await
         .map_err(|_| HandlerError::YouTubeConnectError)?;
 
-    validate_channel_information(channel.clone(), &rss_channel)
+    // Assign the result back: `validate_channel_information` replaces the name
+    // with the canonical one from the feed, and dropping it here would persist
+    // the client-supplied name instead. `validate_videos_against_youtube` does
+    // the same, so both paths normalize identically.
+    (*channel) = validate_channel_information(channel.clone(), &rss_channel)
         .map_err(|_| HandlerError::ValidationError)?;
 
     Ok(())
@@ -207,6 +216,15 @@ pub async fn validate_videos_against_youtube(
 ) -> HandlerResult<()> {
     if !CONFIG.validate_submitted_metadata {
         return Ok(());
+    }
+
+    // `zip` below truncates to the shorter slice, which would silently skip
+    // validation for the tail. This gates metadata validation, so enforce the
+    // contract rather than documenting it.
+    if needs_validation.len() != video_datas.len() {
+        return Err(HandlerError::ValidationErrorWithContext(
+            "validation plan does not match the batch".to_owned(),
+        ));
     }
 
     for video in video_datas.iter() {
@@ -390,6 +408,9 @@ mod test {
         assert!(!verify_image_url("https://ytimg.com.evil.net/a.jpg"));
         // real subdomains are still accepted
         assert!(verify_image_url("https://yt3.googleusercontent.com/a.jpg"));
+        // only https, since clients load whatever is stored here
+        assert!(!verify_image_url("http://i1.ytimg.com/vi/x/hqdefault.jpg"));
+        assert!(!verify_image_url("ftp://i1.ytimg.com/vi/x/hqdefault.jpg"));
     }
 
     #[actix_rt::test]
