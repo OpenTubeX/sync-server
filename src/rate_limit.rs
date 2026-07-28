@@ -13,13 +13,35 @@ use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// Requests permitted per client address within one window.
+/// Requests permitted per client bucket within one window.
 pub const MAX_REQUESTS_PER_WINDOW: u32 = 10;
 pub const WINDOW: Duration = Duration::from_secs(60);
 
-/// Entries are dropped once a window elapses, but a burst of distinct addresses
-/// would still grow the map, so cap how many we track at once.
+/// Hard bound on tracked buckets, so a flood of distinct addresses cannot grow
+/// the map without limit.
 const MAX_TRACKED_CLIENTS: usize = 100_000;
+
+/// Key a client by address, grouping IPv6 by its /64.
+///
+/// A single IPv6 allocation is routinely a /64 or larger, so keying on the full
+/// address would let one host rotate through addresses for unlimited login
+/// attempts. IPv4 is keyed on the full address.
+fn client_bucket(client: IpAddr) -> [u8; 8] {
+    match client {
+        IpAddr::V4(address) => {
+            let mut bucket = [0u8; 8];
+            bucket[..4].copy_from_slice(&address.octets());
+            // tag so that an IPv4 address cannot collide with a /64 prefix
+            bucket[4] = 1;
+            bucket
+        }
+        IpAddr::V6(address) => {
+            let mut bucket = [0u8; 8];
+            bucket.copy_from_slice(&address.octets()[..8]);
+            bucket
+        }
+    }
+}
 
 struct Window {
     started_at: Instant,
@@ -27,7 +49,7 @@ struct Window {
 }
 
 pub struct RateLimiter {
-    windows: Mutex<HashMap<IpAddr, Window>>,
+    windows: Mutex<HashMap<[u8; 8], Window>>,
     max_requests: u32,
     window: Duration,
 }
@@ -46,12 +68,22 @@ impl RateLimiter {
         let now = Instant::now();
         let mut windows = self.windows.lock().expect("rate limiter mutex poisoned");
 
-        // Drop expired entries so the map does not grow without bound.
+        // Bound the map. Expired entries go first; if a flood of distinct
+        // addresses is still live beyond the cap, drop everything rather than
+        // refusing unknown addresses, which would let an attacker with a large
+        // address pool lock every legitimate user out of login.
         if windows.len() >= MAX_TRACKED_CLIENTS {
             windows.retain(|_, window| now.duration_since(window.started_at) < self.window);
+            if windows.len() >= MAX_TRACKED_CLIENTS {
+                log::warn!(
+                    "rate limiter tracked more than {MAX_TRACKED_CLIENTS} live clients; \
+                     resetting counters. Rate limit at the reverse proxy as well."
+                );
+                windows.clear();
+            }
         }
 
-        let entry = windows.entry(client).or_insert(Window {
+        let entry = windows.entry(client_bucket(client)).or_insert(Window {
             started_at: now,
             count: 0,
         });
@@ -101,6 +133,57 @@ mod tests {
         assert!(!limiter.check(client(1)));
         // a different address still gets its own budget
         assert!(limiter.check(client(2)));
+    }
+
+    /// Rotating addresses inside one IPv6 /64 must not buy extra attempts.
+    #[test]
+    fn ipv6_addresses_share_a_64_bucket() {
+        let limiter = RateLimiter::new(2, WINDOW);
+
+        let first: IpAddr = "2001:db8::1".parse().unwrap();
+        let second: IpAddr = "2001:db8::dead:beef".parse().unwrap();
+        let other_prefix: IpAddr = "2001:db8:0:1::1".parse().unwrap();
+
+        assert!(limiter.check(first));
+        assert!(limiter.check(second));
+        // budget for this /64 is now spent, whichever address is used
+        assert!(!limiter.check(first));
+        assert!(!limiter.check(second));
+        // a different /64 is a different bucket
+        assert!(limiter.check(other_prefix));
+    }
+
+    #[test]
+    fn ipv4_does_not_collide_with_an_ipv6_prefix() {
+        let limiter = RateLimiter::new(1, WINDOW);
+
+        // an IPv6 /64 of all zeroes would otherwise share a key with 0.0.0.0
+        let v4: IpAddr = "0.0.0.0".parse().unwrap();
+        let v6: IpAddr = "::".parse().unwrap();
+
+        assert!(limiter.check(v4));
+        assert!(limiter.check(v6));
+    }
+
+    /// Overflow must fail open rather than locking out unknown clients.
+    #[test]
+    fn tracked_clients_stay_bounded_without_locking_clients_out() {
+        let limiter = RateLimiter::new(1, Duration::from_secs(3600));
+
+        for octet_a in 0..=255u8 {
+            for octet_b in 0..=255u8 {
+                limiter.check(IpAddr::V4(Ipv4Addr::new(10, 0, octet_a, octet_b)));
+            }
+        }
+
+        let tracked = limiter.windows.lock().unwrap().len();
+        assert!(
+            tracked <= super::MAX_TRACKED_CLIENTS,
+            "tracked {tracked} buckets"
+        );
+
+        // a fresh client is still served rather than rejected outright
+        assert!(limiter.check(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1))));
     }
 
     #[test]

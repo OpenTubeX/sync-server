@@ -24,13 +24,18 @@ RUN apk add ca-certificates
 
 COPY --from=builder /app/target/release/opentubex-sync /app/opentubex-sync-server
 
-# Run unprivileged. /app/data is owned by this user so the SQLite database and
-# its WAL sidecar files stay writable.
+# Run unprivileged.
+#
+# NOTE for SQLite deployments: a bind-mounted host directory keeps its host
+# ownership and shadows the ownership set here, so the host directory must be
+# owned by this uid or the database and its WAL sidecars are not writable:
+#     sudo chown -R 10001:10001 ./data
+# See the "Running as non-root" section in README.md.
 RUN addgroup -S -g 10001 opentubex \
     && adduser -S -u 10001 -G opentubex opentubex \
     && mkdir -p /app/data \
     && chown -R opentubex:opentubex /app
-USER opentubex
+USER 10001:10001
 
 EXPOSE 8080
 CMD ["./opentubex-sync-server"]

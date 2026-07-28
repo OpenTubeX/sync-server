@@ -50,6 +50,22 @@ There are two ways to configure `sync-server`
 | `validate_submitted_metadata`   | Whether to check incoming video data against YouTube | `true`  | `false`              |
 | `migration_approval`            | Exact comma-separated pending migration versions approved for an existing database after separately verifying a backup | None | `2026-07-21-180000-0000` |
 
+### Running as non-root
+
+The image runs as uid `10001`. A bind-mounted host directory keeps its host
+ownership and shadows the ownership set in the image, so for SQLite deployments
+prepare the data directory once before the first start:
+
+```sh
+mkdir -p ./data
+sudo chown -R 10001:10001 ./data
+```
+
+Without this the server cannot create `db.sqlite` or its WAL sidecar files and
+fails with permission errors. If you are upgrading from an older image that ran
+as root, run the same command against your existing `./data` directory — this
+changes ownership only and does not touch the database contents.
+
 ### Secrets
 
 The server refuses to start if `secret_key` is missing, shorter than 32 bytes, or

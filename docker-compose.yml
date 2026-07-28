@@ -21,6 +21,9 @@ services:
       # every pending migration version. Create and verify a backup before approval.
       # - "MIGRATION_APPROVAL=2026-07-21-180000-0000"
     volumes:
+      # The container runs as uid 10001 and this bind mount keeps host
+      # ownership, so create and chown the directory before the first start:
+      #     mkdir -p ./data && sudo chown -R 10001:10001 ./data
       - ./data:/app/data
     ports:
       - "127.0.0.1:8080:8080"
