@@ -88,7 +88,9 @@ async fn main() -> io::Result<()> {
     // it inside would give each worker separate counters, multiplying the
     // effective rate limit by the number of workers.
     let rate_limiter = web::Data::new(
-        rate_limit::RateLimiter::default().trusting_forwarded_for(CONFIG.trust_forwarded_for),
+        rate_limit::RateLimiter::default()
+            .trusting_forwarded_for(CONFIG.trust_forwarded_for)
+            .with_trusted_proxy_hops(CONFIG.trusted_proxy_hops),
     );
 
     HttpServer::new(move || {

@@ -59,6 +59,7 @@ pub struct RateLimiter {
     window: Duration,
     max_tracked_clients: usize,
     trust_forwarded_for: bool,
+    trusted_proxy_hops: usize,
 }
 
 impl RateLimiter {
@@ -75,6 +76,7 @@ impl RateLimiter {
             window,
             max_tracked_clients,
             trust_forwarded_for: false,
+            trusted_proxy_hops: 1,
         }
     }
 
@@ -87,8 +89,18 @@ impl RateLimiter {
         self
     }
 
+    /// Number of proxies in front of this server, at least one.
+    pub fn with_trusted_proxy_hops(mut self, hops: usize) -> Self {
+        self.trusted_proxy_hops = hops.max(1);
+        self
+    }
+
     pub fn trusts_forwarded_for(&self) -> bool {
         self.trust_forwarded_for
+    }
+
+    pub fn trusted_proxy_hops(&self) -> usize {
+        self.trusted_proxy_hops
     }
 
     /// Record a request from `client` and report whether it is permitted.

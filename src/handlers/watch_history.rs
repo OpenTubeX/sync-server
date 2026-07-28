@@ -18,8 +18,8 @@ use crate::{
     dto::{CreateVideo, ExtendedWatchHistoryItem, WatchedState},
     get_db_conn,
     handlers::{
-        HandlerError, HandlerResult, ScopedHandler, check_bulk_size, check_row_quota,
-        user::auth_middleware,
+        HandlerError, HandlerResult, ScopedHandler, check_already_over_quota, check_bulk_size,
+        check_stored_rows, user::auth_middleware,
     },
     models::{Account, Channel, WatchHistoryItem},
     validation::{validate_videos_against_youtube, videos_requiring_validation},
@@ -83,11 +83,10 @@ async fn prepare_watch_history_items(
     let mut needs_validation = Vec::with_capacity(groups.len());
     {
         let mut conn = get_db_conn!(pool);
-        check_row_quota(
+        check_already_over_quota(
             count_watch_history(&mut conn, account_id)
                 .await
                 .map_err(|_| HandlerError::InternalDatabaseError)?,
-            items.len(),
         )?;
         for videos in &grouped_videos {
             needs_validation.push(videos_requiring_validation(&mut conn, videos).await);
@@ -136,18 +135,18 @@ async fn persist_watch_history_items(
 ) -> HandlerResult<()> {
     conn.transaction::<_, HandlerError, _>(|conn| {
         async move {
-            // Authoritative quota check: the earlier one runs before the network
-            // round-trips, so it cannot bind concurrent writers on its own.
-            check_row_quota(
-                count_watch_history(conn, account_id)
-                    .await
-                    .map_err(|_| HandlerError::InternalDatabaseError)?,
-                items.len(),
-            )?;
-
             for item in items {
                 persist_watch_history_item(conn, item).await?;
             }
+
+            // Authoritative check on the rows that now exist. History entries are
+            // upserts, so counting afterwards is the only way to charge for what
+            // was actually added; an error here rolls the batch back.
+            check_stored_rows(
+                count_watch_history(conn, account_id)
+                    .await
+                    .map_err(|_| HandlerError::InternalDatabaseError)?,
+            )?;
             Ok(())
         }
         .scope_boxed()

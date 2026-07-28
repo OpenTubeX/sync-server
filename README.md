@@ -47,6 +47,7 @@ There are two ways to configure `sync-server`
 | `secret_key`                    | Used to sign authentication tokens. Required, min. 32 bytes | None | output of `openssl rand -hex 32` |
 | `username_secret`               | Used to derive account name hashes. Set it so that `secret_key` stays rotatable | falls back to `secret_key` | output of `openssl rand -hex 32` |
 | `trust_forwarded_for`           | Derive rate limiting client addresses from `X-Forwarded-For`. Required behind a reverse proxy | `false` | `true` |
+| `trusted_proxy_hops`            | Number of proxies in front of this server, used to pick the right `X-Forwarded-For` entry | `1` | `2` |
 | `allow_registration`            | Whether to allow registering on this server          | `true`  | `false`              |
 | `validate_submitted_metadata`   | Whether to check incoming video data against YouTube | `true`  | `false`              |
 | `migration_approval`            | Exact comma-separated pending migration versions approved for an existing database after separately verifying a backup | None | `202607211800000000` |
@@ -72,6 +73,11 @@ The address is taken from the *last* `X-Forwarded-For` entry, which is the one
 your proxy appended, so a client cannot pick its own bucket by sending the header
 itself. Only enable this when the server is not reachable directly, otherwise a
 client can do exactly that.
+
+If you have more than one proxy in the chain — for example Cloudflare in front of
+nginx — set `trusted_proxy_hops` to how many there are. Each proxy appends an
+entry, so with two the last one is the inner proxy's address rather than the
+client's, and leaving this at `1` would put every client in one bucket again.
 
 This limiter is per process and best-effort. Rate limiting at the proxy as well
 is still recommended, and is required if you run multiple replicas.

@@ -21,8 +21,8 @@ use crate::{
     dto::ExtendedSubscriptionGroup,
     get_db_conn,
     handlers::{
-        HandlerError, HandlerResult, ScopedHandler, check_bulk_size, check_row_quota,
-        user::auth_middleware,
+        HandlerError, HandlerResult, ScopedHandler, check_already_over_quota, check_bulk_size,
+        check_stored_rows, user::auth_middleware,
     },
     models::{Account, Channel, SubscriptionGroup},
     validation::{channels_requiring_validation, validate_channel_against_youtube},
@@ -85,11 +85,10 @@ async fn subscribe_bulk(
     // network round-trips so that a slow batch cannot hold one for minutes.
     let pending = {
         let mut conn = get_db_conn!(pool);
-        check_row_quota(
+        check_already_over_quota(
             count_subscriptions(&mut conn, &account.id)
                 .await
                 .map_err(|_| HandlerError::InternalDatabaseError)?,
-            channels.len(),
         )?;
         channels_requiring_validation(&mut conn, &channels).await
     };
@@ -100,18 +99,18 @@ async fn subscribe_bulk(
     let mut conn = get_db_conn!(pool);
     conn.transaction::<_, HandlerError, _>(|conn| {
         async move {
-            // Authoritative quota check: the earlier one runs before the network
-            // round-trips, so it cannot bind concurrent writers on its own.
-            check_row_quota(
-                count_subscriptions(conn, &account.id)
-                    .await
-                    .map_err(|_| HandlerError::InternalDatabaseError)?,
-                channels.len(),
-            )?;
-
             for channel in &channels {
                 add_subscription_by_account_id(conn, channel, &account.id).await?;
             }
+
+            // Authoritative check on the rows that now exist. Subscriptions are
+            // upserts, so counting afterwards is the only way to charge for what
+            // was actually added; an error here rolls the batch back.
+            check_stored_rows(
+                count_subscriptions(conn, &account.id)
+                    .await
+                    .map_err(|_| HandlerError::InternalDatabaseError)?,
+            )?;
             Ok(())
         }
         .scope_boxed()
@@ -154,11 +153,10 @@ async fn subscribe(
     // connection across the YouTube round-trip
     let needs_validation = {
         let mut conn = get_db_conn!(pool);
-        check_row_quota(
+        check_already_over_quota(
             count_subscriptions(&mut conn, &account.id)
                 .await
                 .map_err(|_| HandlerError::InternalDatabaseError)?,
-            1,
         )?;
         !channels_requiring_validation(&mut conn, std::slice::from_ref(&channel))
             .await

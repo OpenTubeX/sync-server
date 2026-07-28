@@ -125,10 +125,24 @@ pub fn check_bulk_size(len: usize) -> HandlerResult<()> {
     Ok(())
 }
 
-/// Reject the request if storing `incoming` more rows would exceed the
-/// per-account quota for a plaintext table.
-pub fn check_row_quota(stored_rows: i64, incoming: usize) -> HandlerResult<()> {
-    if crate::database::quota::exceeds_row_quota(stored_rows, incoming) {
+/// Fail fast when an account is *already* over its quota.
+///
+/// Deliberately does not charge for the incoming batch. All the bulk write paths
+/// are upserts, so a client re-syncing data it already stored adds no rows;
+/// charging the batch up front would reject those re-syncs even though they
+/// change nothing, and would do so precisely when an account is near its limit.
+/// [`check_stored_rows`] does the authoritative check after the writes.
+pub fn check_already_over_quota(stored_rows: i64) -> HandlerResult<()> {
+    check_stored_rows(stored_rows)
+}
+
+/// Authoritative quota check, for use after the writes inside a transaction.
+///
+/// Counting the rows that actually exist is exact regardless of how many of the
+/// incoming entries were updates rather than inserts. Returning an error from
+/// inside the transaction rolls the writes back.
+pub fn check_stored_rows(stored_rows: i64) -> HandlerResult<()> {
+    if crate::database::quota::exceeds_row_quota(stored_rows, 0) {
         return Err(HandlerError::StorageQuotaExceeded);
     }
 

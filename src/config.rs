@@ -4,6 +4,11 @@ const fn default_true() -> bool {
     true
 }
 
+/// One proxy is the common case when `trust_forwarded_for` is enabled.
+const fn default_proxy_hops() -> usize {
+    1
+}
+
 /// Minimum length for any configured secret.
 const MIN_SECRET_LENGTH: usize = 32;
 
@@ -38,6 +43,13 @@ pub struct Config {
     /// client from forging its own address.
     #[serde(default)]
     pub trust_forwarded_for: bool,
+    /// How many proxies sit in front of this server.
+    ///
+    /// Each appends to `X-Forwarded-For`, so with two hops the last entry is the
+    /// inner proxy's address rather than the client's. Only entries appended by
+    /// your own proxies can be trusted; anything further left is client-supplied.
+    #[serde(default = "default_proxy_hops")]
+    pub trusted_proxy_hops: usize,
     #[serde(default = "default_true")]
     pub allow_registration: bool,
     #[serde(default = "default_true")]
@@ -132,6 +144,7 @@ mod tests {
             secret: secret.to_owned(),
             username_secret: username_secret.map(str::to_owned),
             trust_forwarded_for: false,
+            trusted_proxy_hops: 1,
             allow_registration: true,
             validate_submitted_metadata: true,
             database_url: "./db.sqlite".to_owned(),
@@ -141,11 +154,25 @@ mod tests {
 
     const STRONG: &str = "6f1c2f0e8a4b5d3c7e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d";
 
+    /// Asserts on the message, not just that validation failed: every
+    /// placeholder is also shorter than the minimum, so `is_err()` alone would
+    /// still pass if the placeholder matching were removed entirely.
     #[test]
     fn placeholder_secrets_are_rejected() {
-        assert!(validate_secret("secret_key", "changeme").is_err());
-        // rejected regardless of casing, and even though it is long enough
-        assert!(validate_secret("secret_key", "SomeVeryLongString64").is_err());
+        for placeholder in [
+            "changeme",
+            "ChAnGeMe",
+            "SomeVeryLongString64",
+            "SUPERSECRET",
+        ] {
+            let error = validate_secret("secret_key", placeholder)
+                .expect_err("placeholder must be rejected")
+                .to_string();
+            assert!(
+                error.contains("placeholder"),
+                "{placeholder:?} was rejected as {error:?}, not as a placeholder"
+            );
+        }
     }
 
     #[test]

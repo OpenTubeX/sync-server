@@ -13,7 +13,7 @@ use crate::{
     },
     get_db_conn,
     handlers::{
-        HandlerError, HandlerResult, ScopedHandler, check_row_quota, user::auth_middleware,
+        HandlerError, HandlerResult, ScopedHandler, check_stored_rows, user::auth_middleware,
     },
     models::{Account, ChannelPlaybackSpeed},
 };
@@ -84,15 +84,18 @@ async fn store_playback_speed(
 ) -> HandlerResult<()> {
     conn.transaction::<_, HandlerError, _>(|conn| {
         async move {
-            check_row_quota(
-                count_playback_speeds(conn, &speed.account_id)
-                    .await
-                    .map_err(|_| HandlerError::InternalDatabaseError)?,
-                1,
-            )?;
             set_channel_playback_speed(conn, speed)
                 .await
                 .map_err(|_| HandlerError::InternalDatabaseError)?;
+
+            // Authoritative check on the rows that now exist. This is an upsert,
+            // so overwriting an existing speed must not be charged as a new row;
+            // an error here rolls the write back.
+            check_stored_rows(
+                count_playback_speeds(conn, &speed.account_id)
+                    .await
+                    .map_err(|_| HandlerError::InternalDatabaseError)?,
+            )?;
             Ok(())
         }
         .scope_boxed()

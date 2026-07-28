@@ -171,7 +171,11 @@ pub async fn rate_limit_middleware(
     let limiter: Option<&web::Data<RateLimiter>> = req.app_data();
 
     if let Some(limiter) = limiter
-        && let Some(client) = rate_limit_client(&req, limiter.trusts_forwarded_for())
+        && let Some(client) = rate_limit_client(
+            &req,
+            limiter.trusts_forwarded_for(),
+            limiter.trusted_proxy_hops(),
+        )
         && !limiter.check(client)
     {
         return Err(HandlerError::TooManyRequests.into());
@@ -181,7 +185,11 @@ pub async fn rate_limit_middleware(
 }
 
 /// Address to rate limit a request against.
-fn rate_limit_client(req: &ServiceRequest, trust_forwarded_for: bool) -> Option<IpAddr> {
+fn rate_limit_client(
+    req: &ServiceRequest,
+    trust_forwarded_for: bool,
+    trusted_proxy_hops: usize,
+) -> Option<IpAddr> {
     let peer = req.peer_addr().map(|addr| addr.ip());
 
     if !trust_forwarded_for {
@@ -191,20 +199,23 @@ fn rate_limit_client(req: &ServiceRequest, trust_forwarded_for: bool) -> Option<
     req.headers()
         .get("X-Forwarded-For")
         .and_then(|value| value.to_str().ok())
-        .and_then(forwarded_client)
+        .and_then(|header| forwarded_client(header, trusted_proxy_hops))
         .or(peer)
 }
 
 /// Client address from an `X-Forwarded-For` value.
 ///
-/// Takes the *last* entry, because a proxy appends the address it observed. The
-/// earlier entries are whatever the client sent, so trusting the first one would
-/// let a client pick its own bucket and bypass the limit entirely.
-fn forwarded_client(header: &str) -> Option<IpAddr> {
+/// Counts back `trusted_proxy_hops` entries from the end, because each proxy
+/// appends the address it observed. With one proxy that is the last entry; with
+/// two it is the second to last, since the last is then the inner proxy's own
+/// address. Entries further left are whatever the client sent, so counting from
+/// the front would let a client pick its own bucket and bypass the limit.
+fn forwarded_client(header: &str, trusted_proxy_hops: usize) -> Option<IpAddr> {
     header
         .rsplit(',')
         .map(str::trim)
-        .find(|entry| !entry.is_empty())
+        .filter(|entry| !entry.is_empty())
+        .nth(trusted_proxy_hops.saturating_sub(1))
         .and_then(|entry| {
             entry
                 .parse::<IpAddr>()
@@ -289,7 +300,23 @@ mod tests {
         use crate::handlers::user::forwarded_client;
 
         fn resolved(header: &str) -> Option<String> {
-            forwarded_client(header).map(|ip| ip.to_string())
+            resolved_hops(header, 1)
+        }
+
+        fn resolved_hops(header: &str, hops: usize) -> Option<String> {
+            forwarded_client(header, hops).map(|ip| ip.to_string())
+        }
+
+        /// With two proxies the last entry is the inner proxy, not the client.
+        #[test]
+        fn forwarded_client_honours_the_hop_count() {
+            let header = "203.0.113.5, 10.0.0.7";
+            assert_eq!(resolved_hops(header, 1).as_deref(), Some("10.0.0.7"));
+            assert_eq!(resolved_hops(header, 2).as_deref(), Some("203.0.113.5"));
+            // more hops than entries yields nothing, so the caller falls back
+            assert_eq!(resolved_hops(header, 3), None);
+            // zero is treated as one rather than panicking
+            assert_eq!(resolved_hops(header, 0).as_deref(), Some("10.0.0.7"));
         }
 
         /// The last entry is the one a proxy appended; earlier entries are
