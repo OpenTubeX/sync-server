@@ -183,7 +183,16 @@ fn back_up_sqlite_before_migration(
 
 async fn run_migrations(pool: &DbPool, database_url: &str, approval: Option<&str>) {
     // https://github.com/diesel-rs/diesel_async/discussions/268
-    let conn = pool.get_owned().await.unwrap();
+    //
+    // An unwritable data directory shows up here as a pool timeout rather than a
+    // permission error, which is confusing enough to be worth calling out.
+    let conn = pool.get_owned().await.unwrap_or_else(|err| {
+        panic!(
+            "could not open the database at {database_url}: {err}. \
+             If this is a timeout, check that the database and its directory are \
+             writable by the user the server runs as (uid 10001 in the Docker image)."
+        )
+    });
 
     #[cfg(feature = "sqlite")]
     {

@@ -61,10 +61,23 @@ mkdir -p ./data
 sudo chown -R 10001:10001 ./data
 ```
 
-Without this the server cannot create `db.sqlite` or its WAL sidecar files and
-fails with permission errors. If you are upgrading from an older image that ran
-as root, run the same command against your existing `./data` directory — this
-changes ownership only and does not touch the database contents.
+Without this the server cannot create `db.sqlite` or its WAL sidecar files. Note
+that the failure surfaces as a database connection timeout rather than an obvious
+permission error. If you are upgrading from an older image that ran as root, run
+the same command against your existing `./data` directory — this changes
+ownership only and does not touch the database contents.
+
+If you cannot use `sudo`, or your data directory is already owned by your own
+user, override the container user instead of changing ownership:
+
+```yaml
+services:
+  sync:
+    user: "1000:1000" # your own uid:gid, from `id -u`:`id -g`
+```
+
+The server only needs to write inside `/app/data`, so any uid that owns the data
+directory works. This still avoids running as root.
 
 ### Secrets
 
