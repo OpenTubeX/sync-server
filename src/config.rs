@@ -28,6 +28,16 @@ pub struct Config {
     /// for deployments created before the two were split.
     #[serde(default)]
     username_secret: Option<String>,
+    /// Whether to derive the rate limiting client address from
+    /// `X-Forwarded-For` instead of the immediate peer.
+    ///
+    /// Enable this only when the server is reachable exclusively through a
+    /// reverse proxy. Behind a proxy every request arrives from the proxy's own
+    /// address, so without this all clients share a single rate limit bucket.
+    /// If the server is directly reachable, leaving this off is what stops a
+    /// client from forging its own address.
+    #[serde(default)]
+    pub trust_forwarded_for: bool,
     #[serde(default = "default_true")]
     pub allow_registration: bool,
     #[serde(default = "default_true")]
@@ -44,12 +54,24 @@ impl Config {
     /// since accounts are looked up by `HMAC(name)`. Only `secret_key` can be
     /// rotated safely, and only once `username_secret` is set explicitly.
     pub fn username_secret(&self) -> &str {
-        self.username_secret.as_deref().unwrap_or(&self.secret)
+        self.dedicated_username_secret().unwrap_or(&self.secret)
+    }
+
+    /// The account name secret, if pinned independently of `secret_key`.
+    ///
+    /// A blank value counts as unset, so that an empty `username_secret=` in an
+    /// env file or a commented-out sample config falls back to `secret_key`
+    /// rather than failing validation.
+    fn dedicated_username_secret(&self) -> Option<&str> {
+        self.username_secret
+            .as_deref()
+            .map(str::trim)
+            .filter(|secret| !secret.is_empty())
     }
 
     /// Whether the account name secret is pinned independently of `secret_key`.
     pub fn has_dedicated_username_secret(&self) -> bool {
-        self.username_secret.is_some()
+        self.dedicated_username_secret().is_some()
     }
 }
 
@@ -74,7 +96,7 @@ fn validate_secret(name: &str, secret: &str) -> Result<(), ConfigError> {
 
 fn validate_config(config: &Config) -> Result<(), ConfigError> {
     validate_secret("secret_key", &config.secret)?;
-    if let Some(username_secret) = &config.username_secret {
+    if let Some(username_secret) = config.dedicated_username_secret() {
         validate_secret("username_secret", username_secret)?;
     }
 
@@ -109,6 +131,7 @@ mod tests {
         Config {
             secret: secret.to_owned(),
             username_secret: username_secret.map(str::to_owned),
+            trust_forwarded_for: false,
             allow_registration: true,
             validate_submitted_metadata: true,
             database_url: "./db.sqlite".to_owned(),
@@ -137,6 +160,18 @@ mod tests {
         let config = config_with(STRONG, None);
         assert_eq!(config.username_secret(), STRONG);
         assert!(!config.has_dedicated_username_secret());
+    }
+
+    /// A blank value must fall back rather than fail validation, so that an
+    /// empty `USERNAME_SECRET=` in an env file is not a startup error.
+    #[test]
+    fn blank_username_secret_counts_as_unset() {
+        for blank in ["", "   "] {
+            let config = config_with(STRONG, Some(blank));
+            assert_eq!(config.username_secret(), STRONG);
+            assert!(!config.has_dedicated_username_secret());
+            assert!(validate_config(&config).is_ok());
+        }
     }
 
     #[test]

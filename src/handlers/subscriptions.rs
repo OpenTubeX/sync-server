@@ -100,6 +100,15 @@ async fn subscribe_bulk(
     let mut conn = get_db_conn!(pool);
     conn.transaction::<_, HandlerError, _>(|conn| {
         async move {
+            // Authoritative quota check: the earlier one runs before the network
+            // round-trips, so it cannot bind concurrent writers on its own.
+            check_row_quota(
+                count_subscriptions(conn, &account.id)
+                    .await
+                    .map_err(|_| HandlerError::InternalDatabaseError)?,
+                channels.len(),
+            )?;
+
             for channel in &channels {
                 add_subscription_by_account_id(conn, channel, &account.id).await?;
             }

@@ -46,9 +46,35 @@ There are two ways to configure `sync-server`
 | `database_url`                  | Connection string for the database                   | None    | sqlite://./db.sql    |
 | `secret_key`                    | Used to sign authentication tokens. Required, min. 32 bytes | None | output of `openssl rand -hex 32` |
 | `username_secret`               | Used to derive account name hashes. Set it so that `secret_key` stays rotatable | falls back to `secret_key` | output of `openssl rand -hex 32` |
+| `trust_forwarded_for`           | Derive rate limiting client addresses from `X-Forwarded-For`. Required behind a reverse proxy | `false` | `true` |
 | `allow_registration`            | Whether to allow registering on this server          | `true`  | `false`              |
 | `validate_submitted_metadata`   | Whether to check incoming video data against YouTube | `true`  | `false`              |
 | `migration_approval`            | Exact comma-separated pending migration versions approved for an existing database after separately verifying a backup | None | `2026-07-21-180000-0000` |
+
+### Running behind a reverse proxy
+
+`/account/register` and `/account/login` are rate limited per client address. That
+address is the immediate peer by default, which is only correct when the server is
+directly reachable.
+
+The example compose files publish to `127.0.0.1`, so a reverse proxy is the normal
+setup — and there every request arrives from the proxy's own address. Without
+extra configuration all clients would then share a single bucket and legitimate
+users would rate limit each other. Set `trust_forwarded_for = true` so the limit
+is applied per real client:
+
+```yaml
+environment:
+  - "TRUST_FORWARDED_FOR=true"
+```
+
+The address is taken from the *last* `X-Forwarded-For` entry, which is the one
+your proxy appended, so a client cannot pick its own bucket by sending the header
+itself. Only enable this when the server is not reachable directly, otherwise a
+client can do exactly that.
+
+This limiter is per process and best-effort. Rate limiting at the proxy as well
+is still recommended, and is required if you run multiple replicas.
 
 ### Running as non-root
 

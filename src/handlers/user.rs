@@ -1,3 +1,5 @@
+use std::net::{IpAddr, SocketAddr};
+
 use actix_web::body::MessageBody;
 use actix_web::dev::{ServiceFactory, ServiceRequest, ServiceResponse};
 use actix_web::middleware::Next;
@@ -44,7 +46,9 @@ impl ScopedHandler for UserHandler {
         // Note this must wrap the outer scope: an extra nested `scope("")` would
         // match the prefix of, and therefore swallow, its sibling's routes.
         scope::scope("/account")
-            .app_data(web::Data::new(RateLimiter::default()))
+            .app_data(web::Data::new(
+                RateLimiter::default().trusting_forwarded_for(CONFIG.trust_forwarded_for),
+            ))
             .wrap(actix_web::middleware::from_fn(rate_limit_middleware))
             .service(register_account)
             .service(login_account)
@@ -156,22 +160,58 @@ async fn delete_account(
 
 /// Middleware that rate limits unauthenticated endpoints per client address.
 ///
-/// Uses the peer address rather than any forwarded header, since those are
-/// attacker-controlled unless a trusted proxy rewrites them.
+/// Defaults to the peer address, since forwarded headers are client-controlled
+/// when the server is directly reachable. Behind a reverse proxy the peer is the
+/// proxy itself, which would put every client in one bucket, so
+/// `trust_forwarded_for` switches to the forwarded address instead.
 pub async fn rate_limit_middleware(
     req: ServiceRequest,
     next: Next<impl MessageBody>,
 ) -> Result<ServiceResponse<impl MessageBody>, actix_web::Error> {
     let limiter: Option<&web::Data<RateLimiter>> = req.app_data();
-    let client = req.peer_addr().map(|addr| addr.ip());
 
-    if let (Some(limiter), Some(client)) = (limiter, client)
+    if let Some(limiter) = limiter
+        && let Some(client) = rate_limit_client(&req, limiter.trusts_forwarded_for())
         && !limiter.check(client)
     {
         return Err(HandlerError::TooManyRequests.into());
     }
 
     next.call(req).await
+}
+
+/// Address to rate limit a request against.
+fn rate_limit_client(req: &ServiceRequest, trust_forwarded_for: bool) -> Option<IpAddr> {
+    let peer = req.peer_addr().map(|addr| addr.ip());
+
+    if !trust_forwarded_for {
+        return peer;
+    }
+
+    req.headers()
+        .get("X-Forwarded-For")
+        .and_then(|value| value.to_str().ok())
+        .and_then(forwarded_client)
+        .or(peer)
+}
+
+/// Client address from an `X-Forwarded-For` value.
+///
+/// Takes the *last* entry, because a proxy appends the address it observed. The
+/// earlier entries are whatever the client sent, so trusting the first one would
+/// let a client pick its own bucket and bypass the limit entirely.
+fn forwarded_client(header: &str) -> Option<IpAddr> {
+    header
+        .rsplit(',')
+        .map(str::trim)
+        .find(|entry| !entry.is_empty())
+        .and_then(|entry| {
+            entry
+                .parse::<IpAddr>()
+                .ok()
+                // tolerate `host:port` forms
+                .or_else(|| entry.parse::<SocketAddr>().ok().map(|addr| addr.ip()))
+        })
 }
 
 /// Middleware that ensures that the account is authenticated.
@@ -242,6 +282,39 @@ mod tests {
 
     use super::{PlaintextSyncExempt, rate_limit_middleware};
     use crate::rate_limit::RateLimiter;
+
+    // Nested so that `actix_web::test` imported above does not shadow the
+    // built-in `#[test]` attribute for these synchronous tests.
+    mod forwarded {
+        use crate::handlers::user::forwarded_client;
+
+        fn resolved(header: &str) -> Option<String> {
+            forwarded_client(header).map(|ip| ip.to_string())
+        }
+
+        /// The last entry is the one a proxy appended; earlier entries are
+        /// whatever the client sent and must not be trusted.
+        #[test]
+        fn forwarded_client_uses_the_last_entry() {
+            assert_eq!(resolved("203.0.113.5").as_deref(), Some("203.0.113.5"));
+            // a client-supplied spoof followed by the address the proxy saw
+            assert_eq!(
+                resolved("1.1.1.1, 203.0.113.5").as_deref(),
+                Some("203.0.113.5")
+            );
+            assert_eq!(
+                resolved("1.1.1.1, 203.0.113.5:44321").as_deref(),
+                Some("203.0.113.5")
+            );
+        }
+
+        #[test]
+        fn forwarded_client_ignores_unusable_values() {
+            assert_eq!(resolved(""), None);
+            assert_eq!(resolved("not-an-address"), None);
+            assert_eq!(resolved("1.1.1.1, "), Some("1.1.1.1".to_owned()));
+        }
+    }
 
     #[get("/ping")]
     async fn ping() -> impl Responder {
@@ -342,6 +415,46 @@ mod tests {
             status("/playlists/encrypted_sync/ping").await,
             StatusCode::CONFLICT
         );
+    }
+
+    /// Behind a proxy every request shares one peer address, so distinct
+    /// forwarded clients must get their own budgets once the header is trusted.
+    #[actix_rt::test]
+    async fn forwarded_clients_are_bucketed_separately() {
+        let app = test::init_service(
+            App::new().service(
+                web::scope("/t")
+                    .app_data(web::Data::new(
+                        RateLimiter::new(1, Duration::from_secs(3600)).trusting_forwarded_for(true),
+                    ))
+                    .wrap(actix_web::middleware::from_fn(rate_limit_middleware))
+                    .service(ping),
+            ),
+        )
+        .await;
+
+        // same proxy peer for every request, different real clients
+        let proxy: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let expected = [
+            ("203.0.113.1", StatusCode::OK),
+            // a different client is not punished for the first one's request
+            ("203.0.113.2", StatusCode::OK),
+            // but the first client's own budget is spent
+            ("203.0.113.1", StatusCode::TOO_MANY_REQUESTS),
+        ];
+
+        for (client, want) in expected {
+            let req = test::TestRequest::get()
+                .uri("/t/ping")
+                .peer_addr(proxy)
+                .insert_header(("X-Forwarded-For", client))
+                .to_request();
+            let got = match test::try_call_service(&app, req).await {
+                Ok(response) => response.status(),
+                Err(error) => error.as_response_error().status_code(),
+            };
+            assert_eq!(got, want, "client {client}");
+        }
     }
 
     /// Guards against the middleware silently failing open, which would happen

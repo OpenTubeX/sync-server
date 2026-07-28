@@ -52,15 +52,38 @@ pub struct RateLimiter {
     windows: Mutex<HashMap<[u8; 8], Window>>,
     max_requests: u32,
     window: Duration,
+    max_tracked_clients: usize,
+    trust_forwarded_for: bool,
 }
 
 impl RateLimiter {
     pub fn new(max_requests: u32, window: Duration) -> Self {
+        Self::with_capacity(max_requests, window, MAX_TRACKED_CLIENTS)
+    }
+
+    /// Same as [`RateLimiter::new`] with an explicit tracking cap, so that tests
+    /// can exercise the overflow path without inserting 100_000 entries.
+    pub fn with_capacity(max_requests: u32, window: Duration, max_tracked_clients: usize) -> Self {
         Self {
             windows: Mutex::new(HashMap::new()),
             max_requests,
             window,
+            max_tracked_clients,
+            trust_forwarded_for: false,
         }
+    }
+
+    /// Resolve client addresses from `X-Forwarded-For` instead of the peer.
+    ///
+    /// Carried here rather than read from the global config on every request, so
+    /// that the middleware stays unit-testable.
+    pub fn trusting_forwarded_for(mut self, trust: bool) -> Self {
+        self.trust_forwarded_for = trust;
+        self
+    }
+
+    pub fn trusts_forwarded_for(&self) -> bool {
+        self.trust_forwarded_for
     }
 
     /// Record a request from `client` and report whether it is permitted.
@@ -72,12 +95,13 @@ impl RateLimiter {
         // addresses is still live beyond the cap, drop everything rather than
         // refusing unknown addresses, which would let an attacker with a large
         // address pool lock every legitimate user out of login.
-        if windows.len() >= MAX_TRACKED_CLIENTS {
+        if windows.len() >= self.max_tracked_clients {
             windows.retain(|_, window| now.duration_since(window.started_at) < self.window);
-            if windows.len() >= MAX_TRACKED_CLIENTS {
+            if windows.len() >= self.max_tracked_clients {
                 log::warn!(
-                    "rate limiter tracked more than {MAX_TRACKED_CLIENTS} live clients; \
-                     resetting counters. Rate limit at the reverse proxy as well."
+                    "rate limiter tracked more than {} live clients; resetting counters. \
+                     Rate limit at the reverse proxy as well.",
+                    self.max_tracked_clients
                 );
                 windows.clear();
             }
@@ -165,22 +189,29 @@ mod tests {
         assert!(limiter.check(v6));
     }
 
-    /// Overflow must fail open rather than locking out unknown clients.
+    /// Overflow must stay bounded and fail open rather than locking out unknown
+    /// clients. Uses a small cap so the eviction branch is genuinely reached.
     #[test]
     fn tracked_clients_stay_bounded_without_locking_clients_out() {
-        let limiter = RateLimiter::new(1, Duration::from_secs(3600));
+        const CAP: usize = 64;
+        let limiter = RateLimiter::with_capacity(1, Duration::from_secs(3600), CAP);
 
-        for octet_a in 0..=255u8 {
+        // every window is live, so eviction cannot reclaim anything and the
+        // limiter must fall back to clearing
+        let mut seen = 0usize;
+        for octet_a in 0..=3u8 {
             for octet_b in 0..=255u8 {
                 limiter.check(IpAddr::V4(Ipv4Addr::new(10, 0, octet_a, octet_b)));
+                seen += 1;
             }
         }
+        assert!(
+            seen > CAP,
+            "inserted {seen} clients, which must exceed the cap {CAP} to be meaningful"
+        );
 
         let tracked = limiter.windows.lock().unwrap().len();
-        assert!(
-            tracked <= super::MAX_TRACKED_CLIENTS,
-            "tracked {tracked} buckets"
-        );
+        assert!(tracked <= CAP, "tracked {tracked} buckets, cap {CAP}");
 
         // a fresh client is still served rather than rejected outright
         assert!(limiter.check(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1))));

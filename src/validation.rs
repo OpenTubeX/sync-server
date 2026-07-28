@@ -97,24 +97,41 @@ async fn is_channel_validation_required(conn: &mut DbConnection, channel: &Chann
 /// [`validate_channel_against_youtube`], so that a batch of slow network
 /// round-trips never occupies a pooled connection.
 ///
-/// Returned indices are deduplicated by channel id.
+/// Returned indices are deduplicated by the whole channel value.
+///
+/// Deduplicating by id alone would be a validation bypass: two entries can share
+/// an id but carry different names or avatars, and the caller persists every
+/// entry. Skipping the second one would let it reach the database unvalidated.
+/// Channels are shared between accounts, so that would also let one account
+/// poison a channel's avatar for everyone.
 pub async fn channels_requiring_validation(
     conn: &mut DbConnection,
     channels: &[Channel],
 ) -> Vec<usize> {
-    let mut seen = HashSet::new();
     let mut required = Vec::new();
 
-    for (index, channel) in channels.iter().enumerate() {
-        if !seen.insert(&channel.id) {
-            continue;
-        }
-        if is_channel_validation_required(conn, channel).await {
+    for index in distinct_channel_indices(channels) {
+        if is_channel_validation_required(conn, &channels[index]).await {
             required.push(index);
         }
     }
 
     required
+}
+
+/// Indices of the first occurrence of each distinct channel value.
+///
+/// Entries that are fully equal are interchangeable, so validating one covers
+/// the rest. Entries that differ in any field are kept separately.
+fn distinct_channel_indices(channels: &[Channel]) -> Vec<usize> {
+    let mut seen = HashSet::new();
+
+    channels
+        .iter()
+        .enumerate()
+        .filter(|(_, channel)| seen.insert(*channel))
+        .map(|(index, _)| index)
+        .collect()
 }
 
 /// Validate a channel against its YouTube RSS feed.
@@ -317,6 +334,44 @@ mod test {
             validate_video_information, verify_image_url,
         },
     };
+
+    fn channel(id: &str, name: &str) -> Channel {
+        Channel {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            avatar: "https://i1.ytimg.com/vi/x/hqdefault.jpg".to_owned(),
+            verified: false,
+        }
+    }
+
+    /// Regression test: deduplicating by id alone let a second entry sharing an
+    /// id but carrying forged fields reach the database unvalidated.
+    #[test]
+    fn dedup_keeps_channels_that_share_an_id_but_differ() {
+        let channels = [
+            channel("UC_same", "Real Name"),
+            channel("UC_same", "Forged Name"),
+        ];
+
+        assert_eq!(
+            crate::validation::distinct_channel_indices(&channels),
+            vec![0, 1]
+        );
+    }
+
+    #[test]
+    fn dedup_collapses_fully_equal_channels() {
+        let channels = [
+            channel("UC_a", "Name"),
+            channel("UC_a", "Name"),
+            channel("UC_b", "Other"),
+        ];
+
+        assert_eq!(
+            crate::validation::distinct_channel_indices(&channels),
+            vec![0, 2]
+        );
+    }
 
     #[test]
     fn test_image_url_validator() {

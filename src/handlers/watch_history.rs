@@ -131,10 +131,20 @@ async fn persist_watch_history_item(
 
 async fn persist_watch_history_items(
     conn: &mut crate::DbConnection,
+    account_id: &str,
     items: &[ExtendedWatchHistoryItem],
 ) -> HandlerResult<()> {
     conn.transaction::<_, HandlerError, _>(|conn| {
         async move {
+            // Authoritative quota check: the earlier one runs before the network
+            // round-trips, so it cannot bind concurrent writers on its own.
+            check_row_quota(
+                count_watch_history(conn, account_id)
+                    .await
+                    .map_err(|_| HandlerError::InternalDatabaseError)?,
+                items.len(),
+            )?;
+
             for item in items {
                 persist_watch_history_item(conn, item).await?;
             }
@@ -153,7 +163,7 @@ async fn store_watch_history_items(
     let items = prepare_watch_history_items(pool, account_id, items).await?;
 
     let mut conn = get_db_conn!(pool);
-    persist_watch_history_items(&mut conn, &items).await?;
+    persist_watch_history_items(&mut conn, account_id, &items).await?;
 
     Ok(items)
 }

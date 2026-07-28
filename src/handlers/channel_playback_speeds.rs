@@ -1,8 +1,9 @@
 use actix_web::{HttpResponse, Responder, delete, get, middleware::from_fn, put, web};
+use diesel_async::{AsyncConnection, scoped_futures::ScopedFutureExt};
 use utoipa_actix_web::scope;
 
 use crate::{
-    WebData,
+    DbConnection, WebData,
     database::{
         channel_playback_speed::{
             get_channel_playback_speeds_by_account_id, remove_channel_playback_speed,
@@ -68,17 +69,35 @@ async fn put_channel_playback_speed(
 
     speed.account_id = account.id;
     let mut conn = get_db_conn!(pool);
-    check_row_quota(
-        count_playback_speeds(&mut conn, &speed.account_id)
-            .await
-            .map_err(|_| HandlerError::InternalDatabaseError)?,
-        1,
-    )?;
-    set_channel_playback_speed(&mut conn, &speed)
-        .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?;
+    store_playback_speed(&mut conn, &speed).await?;
 
     Ok(HttpResponse::Ok().json(speed))
+}
+
+/// Store a playback speed, enforcing the row quota in the same transaction.
+///
+/// Checking and writing separately would let two concurrent requests both pass
+/// the check and then both insert, pushing the account past the quota.
+async fn store_playback_speed(
+    conn: &mut DbConnection,
+    speed: &ChannelPlaybackSpeed,
+) -> HandlerResult<()> {
+    conn.transaction::<_, HandlerError, _>(|conn| {
+        async move {
+            check_row_quota(
+                count_playback_speeds(conn, &speed.account_id)
+                    .await
+                    .map_err(|_| HandlerError::InternalDatabaseError)?,
+                1,
+            )?;
+            set_channel_playback_speed(conn, speed)
+                .await
+                .map_err(|_| HandlerError::InternalDatabaseError)?;
+            Ok(())
+        }
+        .scope_boxed()
+    })
+    .await
 }
 
 #[utoipa::path(responses((status = OK)), security(("api_jwt_token" = [])))]

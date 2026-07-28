@@ -15,6 +15,10 @@ services:
       # Set to the same value as SECRET_KEY. Keeping it separate is what allows
       # SECRET_KEY to be rotated later without locking out every account.
       - "USERNAME_SECRET=${USERNAME_SECRET:?set this to the same value as SECRET_KEY}"
+      # These files publish to 127.0.0.1, i.e. behind a reverse proxy, where
+      # every request arrives from the proxy and all clients would otherwise
+      # share one rate limit bucket. Remove this if exposing the port directly.
+      - "TRUST_FORWARDED_FOR=true"
       - "ALLOW_REGISTRATION=true"
       - "VALIDATE_SUBMITTED_METADATA=true"
     # Or use a configuration file:

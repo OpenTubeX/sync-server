@@ -1,4 +1,5 @@
 use actix_web::{HttpResponse, Responder, delete, get, middleware::from_fn, patch, post, web};
+use diesel_async::{AsyncConnection, scoped_futures::ScopedFutureExt};
 use itertools::Itertools;
 use utoipa_actix_web::scope;
 
@@ -241,18 +242,35 @@ async fn add_to_playlist(
     }
 
     let mut conn = get_db_conn!(pool);
-    for (channel, videos) in &groups {
-        // store channel information first before storing video to ensure data integrity
-        create_or_update_channel(&mut conn, channel)
-            .await
-            .map_err(|_| HandlerError::InternalDatabaseError)?;
+    conn.transaction::<_, HandlerError, _>(|conn| {
+        let (groups, playlist_id, account_id) = (&groups, &*playlist_id, &account.id);
+        async move {
+            // Authoritative quota check: the earlier one runs before the network
+            // round-trips, so it cannot bind concurrent writers on its own.
+            check_row_quota(
+                count_playlist_videos(conn, account_id)
+                    .await
+                    .map_err(|_| HandlerError::InternalDatabaseError)?,
+                groups.iter().map(|(_, videos)| videos.len()).sum(),
+            )?;
 
-        for video in videos {
-            add_video_to_playlist(&mut conn, &playlist_id, &account.id, &video.into())
-                .await
-                .map_err(|_| HandlerError::InternalDatabaseError)?;
+            for (channel, videos) in groups {
+                // store channel information first before storing video to ensure data integrity
+                create_or_update_channel(conn, channel)
+                    .await
+                    .map_err(|_| HandlerError::InternalDatabaseError)?;
+
+                for video in videos {
+                    add_video_to_playlist(conn, playlist_id, account_id, &video.into())
+                        .await
+                        .map_err(|_| HandlerError::InternalDatabaseError)?;
+                }
+            }
+            Ok(())
         }
-    }
+        .scope_boxed()
+    })
+    .await?;
 
     Ok(HttpResponse::Created())
 }
