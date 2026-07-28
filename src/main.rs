@@ -1,7 +1,11 @@
 #[macro_use]
 extern crate diesel;
 
-use std::{io, path::Path, sync::LazyLock};
+use std::{io, sync::LazyLock};
+
+// only used by the sqlite pre-migration backup
+#[cfg(feature = "sqlite")]
+use std::path::Path;
 
 use actix_web::{App, HttpServer, middleware, web};
 #[cfg(feature = "sqlite")]
