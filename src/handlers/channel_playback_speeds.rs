@@ -1,14 +1,20 @@
 use actix_web::{HttpResponse, Responder, delete, get, middleware::from_fn, put, web};
+use diesel_async::{AsyncConnection, scoped_futures::ScopedFutureExt};
 use utoipa_actix_web::scope;
 
 use crate::{
-    WebData,
-    database::channel_playback_speed::{
-        get_channel_playback_speeds_by_account_id, remove_channel_playback_speed,
-        set_channel_playback_speed,
+    DbConnection, WebData,
+    database::{
+        channel_playback_speed::{
+            get_channel_playback_speeds_by_account_id, remove_channel_playback_speed,
+            set_channel_playback_speed,
+        },
+        quota::count_playback_speeds,
     },
     get_db_conn,
-    handlers::{HandlerError, HandlerResult, ScopedHandler, user::auth_middleware},
+    handlers::{
+        HandlerError, HandlerResult, ScopedHandler, check_stored_rows, user::auth_middleware,
+    },
     models::{Account, ChannelPlaybackSpeed},
 };
 
@@ -63,11 +69,38 @@ async fn put_channel_playback_speed(
 
     speed.account_id = account.id;
     let mut conn = get_db_conn!(pool);
-    set_channel_playback_speed(&mut conn, &speed)
-        .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?;
+    store_playback_speed(&mut conn, &speed).await?;
 
     Ok(HttpResponse::Ok().json(speed))
+}
+
+/// Store a playback speed, enforcing the row quota in the same transaction.
+///
+/// Checking and writing separately would let two concurrent requests both pass
+/// the check and then both insert, pushing the account past the quota.
+async fn store_playback_speed(
+    conn: &mut DbConnection,
+    speed: &ChannelPlaybackSpeed,
+) -> HandlerResult<()> {
+    conn.transaction::<_, HandlerError, _>(|conn| {
+        async move {
+            set_channel_playback_speed(conn, speed)
+                .await
+                .map_err(|_| HandlerError::InternalDatabaseError)?;
+
+            // Authoritative check on the rows that now exist. This is an upsert,
+            // so overwriting an existing speed must not be charged as a new row;
+            // an error here rolls the write back.
+            check_stored_rows(
+                count_playback_speeds(conn, &speed.account_id)
+                    .await
+                    .map_err(|_| HandlerError::InternalDatabaseError)?,
+            )?;
+            Ok(())
+        }
+        .scope_boxed()
+    })
+    .await
 }
 
 #[utoipa::path(responses((status = OK)), security(("api_jwt_token" = [])))]

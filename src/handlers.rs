@@ -62,6 +62,12 @@ pub enum HandlerError {
     EncryptedSyncConflict,
     #[error("encrypted sync collection is too large")]
     EncryptedSyncTooLarge,
+    #[error("too many items in one request (max {0})")]
+    BulkRequestTooLarge(usize),
+    #[error("too many requests; slow down and try again later")]
+    TooManyRequests,
+    #[error("account storage quota exceeded")]
+    StorageQuotaExceeded,
     #[error("encrypted sync account storage quota exceeded")]
     EncryptedSyncQuotaExceeded,
     #[error("this account requires the encrypted sync endpoint")]
@@ -93,6 +99,9 @@ impl ResponseError for HandlerError {
             Self::ValidationErrorWithContext(_) => StatusCode::BAD_REQUEST,
             Self::EncryptedSyncConflict => StatusCode::CONFLICT,
             Self::EncryptedSyncTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::BulkRequestTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
+            Self::StorageQuotaExceeded => StatusCode::PAYLOAD_TOO_LARGE,
             Self::EncryptedSyncQuotaExceeded => StatusCode::PAYLOAD_TOO_LARGE,
             Self::EncryptedSyncRequired => StatusCode::CONFLICT,
             Self::YouTubeConnectError => StatusCode::INTERNAL_SERVER_ERROR,
@@ -101,6 +110,44 @@ impl ResponseError for HandlerError {
 }
 
 pub type HandlerResult<T> = Result<T, HandlerError>;
+
+/// Upper bound on how many items one bulk request may carry.
+///
+/// Validation can issue a YouTube round-trip per distinct channel, so an
+/// unbounded batch lets a single request occupy a worker for an unbounded time.
+pub const MAX_BULK_ITEMS: usize = 1000;
+
+pub fn check_bulk_size(len: usize) -> HandlerResult<()> {
+    if len > MAX_BULK_ITEMS {
+        return Err(HandlerError::BulkRequestTooLarge(MAX_BULK_ITEMS));
+    }
+
+    Ok(())
+}
+
+/// Fail fast when an account is *already* over its quota.
+///
+/// Deliberately does not charge for the incoming batch. All the bulk write paths
+/// are upserts, so a client re-syncing data it already stored adds no rows;
+/// charging the batch up front would reject those re-syncs even though they
+/// change nothing, and would do so precisely when an account is near its limit.
+/// [`check_stored_rows`] does the authoritative check after the writes.
+pub fn check_already_over_quota(stored_rows: i64) -> HandlerResult<()> {
+    check_stored_rows(stored_rows)
+}
+
+/// Authoritative quota check, for use after the writes inside a transaction.
+///
+/// Counting the rows that actually exist is exact regardless of how many of the
+/// incoming entries were updates rather than inserts. Returning an error from
+/// inside the transaction rolls the writes back.
+pub fn check_stored_rows(stored_rows: i64) -> HandlerResult<()> {
+    if crate::database::quota::exceeds_row_quota(stored_rows, 0) {
+        return Err(HandlerError::StorageQuotaExceeded);
+    }
+
+    Ok(())
+}
 
 impl From<diesel::result::Error> for HandlerError {
     fn from(error: diesel::result::Error) -> Self {

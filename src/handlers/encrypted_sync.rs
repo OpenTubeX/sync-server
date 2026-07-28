@@ -9,7 +9,7 @@ use crate::dto::{
     EncryptedSyncCollectionResponse, EncryptedSyncCollectionRevision, EncryptedSyncManifest,
     PutEncryptedSync, SyncCapabilities,
 };
-use crate::handlers::user::auth_middleware;
+use crate::handlers::user::{PlaintextSyncExempt, auth_middleware};
 use crate::handlers::{HandlerError, HandlerResult, ScopedHandler};
 use crate::models::Account;
 use crate::{WebData, get_db_conn};
@@ -41,6 +41,7 @@ impl ScopedHandler for EncryptedSyncHandler {
         scope::scope("").service(
             scope::scope("/encrypted_sync")
                 .app_data(web::JsonConfig::default().limit(MAX_ENCRYPTED_SYNC_BYTES + 1024))
+                .app_data(web::Data::new(PlaintextSyncExempt))
                 .wrap(actix_web::middleware::from_fn(auth_middleware))
                 .service(get_encrypted_sync_manifest)
                 .service(get_legacy_encrypted_sync)

@@ -1,4 +1,13 @@
 database_url = "./db.sqlite"
-secret_key = "changeme"
+# Generate with `openssl rand -hex 32`. The server refuses to start on a
+# placeholder value or anything shorter than 32 bytes.
+secret_key = ""
+# Set this to the same value as secret_key above. Keeping it separate is what
+# allows secret_key to be rotated later without locking out every account.
+# Left unset it falls back to secret_key.
+# username_secret = ""
+# Enable only when the server is reachable exclusively through a reverse proxy,
+# so that rate limiting sees real client addresses instead of the proxy's.
+# trust_forwarded_for = true
 allow_registration = true
 validate_submitted_metadata = true

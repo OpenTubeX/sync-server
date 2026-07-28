@@ -1,7 +1,11 @@
 #[macro_use]
 extern crate diesel;
 
-use std::{io, path::Path, sync::LazyLock};
+use std::{io, sync::LazyLock};
+
+// only used by the sqlite pre-migration backup
+#[cfg(feature = "sqlite")]
+use std::path::Path;
 
 use actix_web::{App, HttpServer, middleware, web};
 #[cfg(feature = "sqlite")]
@@ -34,6 +38,7 @@ mod dto;
 mod handlers;
 mod models;
 mod openapi;
+mod rate_limit;
 mod schema;
 mod validation;
 
@@ -79,11 +84,21 @@ async fn main() -> io::Result<()> {
 
     log::info!("starting HTTP server at http://localhost:8080");
 
+    // Built once and shared, because the closure below runs per worker. Building
+    // it inside would give each worker separate counters, multiplying the
+    // effective rate limit by the number of workers.
+    let rate_limiter = web::Data::new(
+        rate_limit::RateLimiter::default()
+            .trusting_forwarded_for(CONFIG.trust_forwarded_for)
+            .with_trusted_proxy_hops(CONFIG.trusted_proxy_hops),
+    );
+
     HttpServer::new(move || {
         let (app, generated_api) = App::new()
             .into_utoipa_app()
             // add DB pool handle to app data; enables use of `web::Data<DbPool>` extractor
             .app_data(web::Data::new(pool.clone()))
+            .app_data(rate_limiter.clone())
             .service(
                 utoipa_actix_web::scope("/v1")
                     .service(UserHandler::get_service())
@@ -121,8 +136,11 @@ async fn initialize_db_pool(db_url: &str) -> Result<DbPool, PoolError> {
             let url = url.to_owned();
             Box::pin(async move {
                 let mut conn = DbConnection::establish(&url).await?;
+                // `foreign_keys` defaults to OFF in SQLite and must be enabled per
+                // connection, otherwise none of the ON DELETE CASCADE constraints
+                // fire and deleting an account orphans all of its rows.
                 conn.batch_execute(
-                    "PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 30000; PRAGMA synchronous = NORMAL;",
+                    "PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 30000; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;",
                 )
                 .await
                 .map_err(|err| diesel::ConnectionError::BadConnection(err.to_string()))?;
@@ -179,7 +197,16 @@ fn back_up_sqlite_before_migration(
 
 async fn run_migrations(pool: &DbPool, database_url: &str, approval: Option<&str>) {
     // https://github.com/diesel-rs/diesel_async/discussions/268
-    let conn = pool.get_owned().await.unwrap();
+    //
+    // An unwritable data directory shows up here as a pool timeout rather than a
+    // permission error, which is confusing enough to be worth calling out.
+    let conn = pool.get_owned().await.unwrap_or_else(|err| {
+        panic!(
+            "could not open the database at {database_url}: {err}. \
+             If this is a timeout, check that the database and its directory are \
+             writable by the user the server runs as (uid 10001 in the Docker image)."
+        )
+    });
 
     #[cfg(feature = "sqlite")]
     {

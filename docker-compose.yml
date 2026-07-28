@@ -8,13 +8,26 @@ services:
         - "DATABASE_BACKEND=sqlite"
     environment:
       - "DATABASE_URL=./data/db.sqlite"
-      - "SECRET_KEY=changeme"
+      # REQUIRED. Generate with `openssl rand -hex 32` and put it in a .env file
+      # next to this compose file. The server refuses to start on a placeholder
+      # value or anything shorter than 32 bytes.
+      - "SECRET_KEY=${SECRET_KEY:?generate one with: openssl rand -hex 32}"
+      # Set to the same value as SECRET_KEY. Keeping it separate is what allows
+      # SECRET_KEY to be rotated later without locking out every account.
+      - "USERNAME_SECRET=${USERNAME_SECRET:?set this to the same value as SECRET_KEY}"
+      # These files publish to 127.0.0.1, i.e. behind a reverse proxy, where
+      # every request arrives from the proxy and all clients would otherwise
+      # share one rate limit bucket. Remove this if exposing the port directly.
+      - "TRUST_FORWARDED_FOR=true"
       - "ALLOW_REGISTRATION=true"
       - "VALIDATE_SUBMITTED_METADATA=true"
       # Existing databases refuse pending migrations unless this exactly lists
       # every pending migration version. Create and verify a backup before approval.
-      # - "MIGRATION_APPROVAL=2026-07-21-180000-0000"
+      # - "MIGRATION_APPROVAL=202607211800000000"
     volumes:
+      # The container runs as uid 10001 and this bind mount keeps host
+      # ownership, so create and chown the directory before the first start:
+      #     mkdir -p ./data && sudo chown -R 10001:10001 ./data
       - ./data:/app/data
     ports:
       - "127.0.0.1:8080:8080"

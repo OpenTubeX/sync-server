@@ -19,7 +19,11 @@ use super::schema::*;
 #[diesel(table_name = account)]
 pub struct Account {
     pub id: String,
+    // Never serialize credential material into a response body. Deserialization
+    // is kept so the struct still round-trips through diesel.
+    #[serde(skip_serializing)]
     pub name_hash: String,
+    #[serde(skip_serializing)]
     pub password_hash: String,
 }
 

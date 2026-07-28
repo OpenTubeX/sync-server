@@ -44,13 +44,89 @@ There are two ways to configure `sync-server`
 | Config option                   | Description                                          | Default | Example              |
 | ----------------------          | ---------------------------------------------------- | ------- | -------------------- |
 | `database_url`                  | Connection string for the database                   | None    | sqlite://./db.sql    |
-| `secret_key`                    | Used to sign authentication tokens                   | None    | SomeVeryLongString64 |
+| `secret_key`                    | Used to sign authentication tokens. Required, min. 32 bytes | None | output of `openssl rand -hex 32` |
+| `username_secret`               | Used to derive account name hashes. Set it so that `secret_key` stays rotatable | falls back to `secret_key` | output of `openssl rand -hex 32` |
+| `trust_forwarded_for`           | Derive rate limiting client addresses from `X-Forwarded-For`. Required behind a reverse proxy | `false` | `true` |
+| `trusted_proxy_hops`            | Number of proxies in front of this server, used to pick the right `X-Forwarded-For` entry | `1` | `2` |
 | `allow_registration`            | Whether to allow registering on this server          | `true`  | `false`              |
 | `validate_submitted_metadata`   | Whether to check incoming video data against YouTube | `true`  | `false`              |
-| `migration_approval`            | Exact comma-separated pending migration versions approved for an existing database after separately verifying a backup | None | `2026-07-21-180000-0000` |
+| `migration_approval`            | Exact comma-separated pending migration versions approved for an existing database after separately verifying a backup | None | `202607211800000000` |
+
+### Running behind a reverse proxy
+
+`/account/register` and `/account/login` are rate limited per client address. That
+address is the immediate peer by default, which is only correct when the server is
+directly reachable.
+
+The example compose files publish to `127.0.0.1`, so a reverse proxy is the normal
+setup — and there every request arrives from the proxy's own address. Without
+extra configuration all clients would then share a single bucket and legitimate
+users would rate limit each other. Set `trust_forwarded_for = true` so the limit
+is applied per real client:
+
+```yaml
+environment:
+  - "TRUST_FORWARDED_FOR=true"
+```
+
+The address is taken from the *last* `X-Forwarded-For` entry, which is the one
+your proxy appended, so a client cannot pick its own bucket by sending the header
+itself. Only enable this when the server is not reachable directly, otherwise a
+client can do exactly that.
+
+If you have more than one proxy in the chain — for example Cloudflare in front of
+nginx — set `trusted_proxy_hops` to how many there are. Each proxy appends an
+entry, so with two the last one is the inner proxy's address rather than the
+client's, and leaving this at `1` would put every client in one bucket again.
+
+This limiter is per process and best-effort. Rate limiting at the proxy as well
+is still recommended, and is required if you run multiple replicas.
+
+### Running as non-root
+
+The image runs as uid `10001`. A bind-mounted host directory keeps its host
+ownership and shadows the ownership set in the image, so for SQLite deployments
+prepare the data directory once before the first start:
+
+```sh
+mkdir -p ./data
+sudo chown -R 10001:10001 ./data
+```
+
+Without this the server cannot create `db.sqlite` or its WAL sidecar files. Note
+that the failure surfaces as a database connection timeout rather than an obvious
+permission error. If you are upgrading from an older image that ran as root, run
+the same command against your existing `./data` directory — this changes
+ownership only and does not touch the database contents.
+
+If you cannot use `sudo`, or your data directory is already owned by your own
+user, override the container user instead of changing ownership:
+
+```yaml
+services:
+  sync:
+    user: "1000:1000" # your own uid:gid, from `id -u`:`id -g`
+```
+
+The server only needs to write inside `/app/data`, so any uid that owns the data
+directory works. This still avoids running as root.
+
+### Secrets
+
+The server refuses to start if `secret_key` is missing, shorter than 32 bytes, or
+left at a placeholder such as `changeme`. Generate one with `openssl rand -hex 32`.
+
+Accounts are looked up by `HMAC(username)`, so changing the secret that derives
+that hash makes every existing account unreachable. Set `username_secret`
+explicitly (initially to the same value as `secret_key`) so that `secret_key`
+itself can later be rotated — for example after a suspected leak — without
+locking anyone out.
 
 Existing databases never apply pending migrations implicitly. After you create and verify
-a separate backup, `migration_approval` must exactly match every pending version. SQLite
+a separate backup, `migration_approval` must exactly match every pending version.
+Versions are digits only, without the hyphens used in the migration directory
+names — the startup error prints the exact value to use, so the simplest approach
+is to start the server once and copy it from the log. SQLite
 also creates a consistent `*.pre-migration-<version>` backup immediately before changing
 the schema. Remove the approval after deployment so it cannot authorize a later migration.
 
