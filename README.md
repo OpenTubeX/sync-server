@@ -74,10 +74,21 @@ your proxy appended, so a client cannot pick its own bucket by sending the heade
 itself. Only enable this when the server is not reachable directly, otherwise a
 client can do exactly that.
 
-If you have more than one proxy in the chain — for example Cloudflare in front of
-nginx — set `trusted_proxy_hops` to how many there are. Each proxy appends an
-entry, so with two the last one is the inner proxy's address rather than the
-client's, and leaving this at `1` would put every client in one bucket again.
+If you have more than one proxy in the chain, set `trusted_proxy_hops` to how many
+there are. Each proxy appends an entry, so with two the last one is the inner
+proxy's address rather than the client's.
+
+**Cloudflare Tunnel counts as two hops.** The Cloudflare edge adds the client
+address and `cloudflared` appends its own, so `trusted_proxy_hops = 2` is correct
+for a `cloudflared` deployment. Leaving it at `1` is worse than having no
+per-client limit: the trailing entry varies between edge addresses, so requests
+scatter across buckets and the limit becomes both bypassable and randomly
+triggered for innocent clients.
+
+Verify your value rather than assuming it. Send more than
+`MAX_REQUESTS_PER_WINDOW` failed logins from one client and check that the
+responses switch to `429` and stay there. If they alternate between `429` and
+normal responses, the resolved address is not stable and the hop count is wrong.
 
 This limiter is per process and best-effort. Rate limiting at the proxy as well
 is still recommended, and is required if you run multiple replicas.
