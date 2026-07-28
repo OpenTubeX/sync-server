@@ -5,6 +5,7 @@ pub mod encrypted_sync;
 pub mod playlist;
 pub mod playlist_bookmark;
 pub mod public_playlist;
+pub mod quota;
 pub mod subscription;
 pub mod subscription_groups;
 pub mod video;

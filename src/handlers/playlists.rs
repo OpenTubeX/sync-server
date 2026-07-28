@@ -11,12 +11,16 @@ use crate::{
             get_playlist_by_id_with_videos, get_playlist_video_count, get_playlists_by_account_id,
             remove_video_from_playlist, update_existing_playlist,
         },
+        quota::count_playlist_videos,
     },
     dto::{CreatePlaylist, CreateVideo, ExtendedPlaylist, PlaylistResponse},
     get_db_conn,
-    handlers::{HandlerError, HandlerResult, ScopedHandler, user::auth_middleware},
-    models::{Account, Playlist},
-    validation::validate_video_information_if_changed,
+    handlers::{
+        HandlerError, HandlerResult, ScopedHandler, check_bulk_size, check_row_quota,
+        user::auth_middleware,
+    },
+    models::{Account, Channel, Playlist},
+    validation::{validate_videos_against_youtube, videos_requiring_validation},
 };
 
 pub struct PlaylistsHandler {}
@@ -203,28 +207,48 @@ async fn add_to_playlist(
     playlist_id: web::Path<String>,
     video_datas: web::Json<Vec<CreateVideo>>,
 ) -> HandlerResult<impl Responder> {
-    let mut conn = get_db_conn!(pool);
-
-    get_owned_playlist_or_error(&mut conn, &playlist_id, &account.id).await?;
-
     let video_datas = video_datas.into_inner();
-    let videos_grouped_by_uploader = video_datas
-        .iter()
+    check_bulk_size(video_datas.len())?;
+
+    // one RSS fetch per distinct uploader rather than per video
+    let mut groups: Vec<(Channel, Vec<CreateVideo>)> = video_datas
+        .into_iter()
         .sorted_by(|a, b| Ord::cmp(&a.uploader.id, &b.uploader.id))
-        .chunk_by(|video| video.uploader.clone());
+        .chunk_by(|video| video.uploader.clone())
+        .into_iter()
+        .map(|(channel, videos)| (channel, videos.collect()))
+        .collect();
 
-    for (mut channel, videos) in &videos_grouped_by_uploader {
-        let mut videos: Vec<_> = videos.cloned().collect();
+    // Decide what needs validating, then release the connection before the
+    // network round-trips so a slow batch cannot hold one for minutes.
+    let mut needs_validation = Vec::with_capacity(groups.len());
+    {
+        let mut conn = get_db_conn!(pool);
+        get_owned_playlist_or_error(&mut conn, &playlist_id, &account.id).await?;
+        check_row_quota(
+            count_playlist_videos(&mut conn, &account.id)
+                .await
+                .map_err(|_| HandlerError::InternalDatabaseError)?,
+            groups.iter().map(|(_, videos)| videos.len()).sum(),
+        )?;
+        for (_, videos) in &groups {
+            needs_validation.push(videos_requiring_validation(&mut conn, videos).await);
+        }
+    }
 
-        validate_video_information_if_changed(&mut conn, &mut videos, &mut channel).await?;
+    for ((channel, videos), needs_validation) in groups.iter_mut().zip(&needs_validation) {
+        validate_videos_against_youtube(videos, needs_validation, channel).await?;
+    }
 
+    let mut conn = get_db_conn!(pool);
+    for (channel, videos) in &groups {
         // store channel information first before storing video to ensure data integrity
-        create_or_update_channel(&mut conn, &channel)
+        create_or_update_channel(&mut conn, channel)
             .await
             .map_err(|_| HandlerError::InternalDatabaseError)?;
 
         for video in videos {
-            add_video_to_playlist(&mut conn, &playlist_id, &account.id, &(&video).into())
+            add_video_to_playlist(&mut conn, &playlist_id, &account.id, &video.into())
                 .await
                 .map_err(|_| HandlerError::InternalDatabaseError)?;
         }

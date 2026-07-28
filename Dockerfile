@@ -24,5 +24,13 @@ RUN apk add ca-certificates
 
 COPY --from=builder /app/target/release/opentubex-sync /app/opentubex-sync-server
 
+# Run unprivileged. /app/data is owned by this user so the SQLite database and
+# its WAL sidecar files stay writable.
+RUN addgroup -S -g 10001 opentubex \
+    && adduser -S -u 10001 -G opentubex opentubex \
+    && mkdir -p /app/data \
+    && chown -R opentubex:opentubex /app
+USER opentubex
+
 EXPOSE 8080
 CMD ["./opentubex-sync-server"]

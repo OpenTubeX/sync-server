@@ -7,6 +7,7 @@ use crate::{
     WebData,
     database::{
         channel::create_or_update_channel,
+        quota::count_watch_history,
         video::create_or_update_video,
         watch_history::{
             DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, add_or_update_video_to_watch_history,
@@ -16,9 +17,12 @@ use crate::{
     },
     dto::{CreateVideo, ExtendedWatchHistoryItem, WatchedState},
     get_db_conn,
-    handlers::{HandlerError, HandlerResult, ScopedHandler, user::auth_middleware},
-    models::{Account, WatchHistoryItem},
-    validation::validate_video_information_if_changed_single,
+    handlers::{
+        HandlerError, HandlerResult, ScopedHandler, check_bulk_size, check_row_quota,
+        user::auth_middleware,
+    },
+    models::{Account, Channel, WatchHistoryItem},
+    validation::{validate_videos_against_youtube, videos_requiring_validation},
 };
 
 pub struct WatchHistoryHandler;
@@ -44,16 +48,68 @@ impl ScopedHandler for WatchHistoryHandler {
     }
 }
 
-async fn prepare_watch_history_item(
-    conn: &mut crate::DbConnection,
+/// Stamp ownership onto a batch of items and validate their videos.
+///
+/// Validation is grouped by uploader, so a batch costs one YouTube round-trip
+/// per distinct channel rather than one per item, and no pooled connection is
+/// held while those round-trips happen.
+async fn prepare_watch_history_items(
+    pool: &WebData,
     account_id: &str,
-    mut item: ExtendedWatchHistoryItem,
-) -> HandlerResult<ExtendedWatchHistoryItem> {
-    item.metadata.account_id = account_id.to_string();
-    item.metadata.video_id = item.video.id.clone();
+    mut items: Vec<ExtendedWatchHistoryItem>,
+) -> HandlerResult<Vec<ExtendedWatchHistoryItem>> {
+    for item in &mut items {
+        item.metadata.account_id = account_id.to_string();
+        item.metadata.video_id = item.video.id.clone();
+    }
 
-    validate_video_information_if_changed_single(conn, &mut item.video).await?;
-    Ok(item)
+    // group item indices by uploader, preserving the caller's ordering
+    let mut groups: Vec<(Channel, Vec<usize>)> = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        match groups
+            .iter_mut()
+            .find(|(channel, _)| *channel == item.video.uploader)
+        {
+            Some((_, indices)) => indices.push(index),
+            None => groups.push((item.video.uploader.clone(), vec![index])),
+        }
+    }
+
+    let mut grouped_videos: Vec<Vec<CreateVideo>> = groups
+        .iter()
+        .map(|(_, indices)| indices.iter().map(|i| items[*i].video.clone()).collect())
+        .collect();
+
+    let mut needs_validation = Vec::with_capacity(groups.len());
+    {
+        let mut conn = get_db_conn!(pool);
+        check_row_quota(
+            count_watch_history(&mut conn, account_id)
+                .await
+                .map_err(|_| HandlerError::InternalDatabaseError)?,
+            items.len(),
+        )?;
+        for videos in &grouped_videos {
+            needs_validation.push(videos_requiring_validation(&mut conn, videos).await);
+        }
+    }
+
+    for (((channel, _), videos), needs_validation) in groups
+        .iter_mut()
+        .zip(grouped_videos.iter_mut())
+        .zip(&needs_validation)
+    {
+        validate_videos_against_youtube(videos, needs_validation, channel).await?;
+    }
+
+    // write the validated metadata back onto the items
+    for ((_, indices), videos) in groups.iter().zip(&grouped_videos) {
+        for (index, video) in indices.iter().zip(videos) {
+            items[*index].video = video.clone();
+        }
+    }
+
+    Ok(items)
 }
 
 async fn persist_watch_history_item(
@@ -73,14 +129,33 @@ async fn persist_watch_history_item(
     Ok(())
 }
 
-async fn store_watch_history_item(
+async fn persist_watch_history_items(
     conn: &mut crate::DbConnection,
+    items: &[ExtendedWatchHistoryItem],
+) -> HandlerResult<()> {
+    conn.transaction::<_, HandlerError, _>(|conn| {
+        async move {
+            for item in items {
+                persist_watch_history_item(conn, item).await?;
+            }
+            Ok(())
+        }
+        .scope_boxed()
+    })
+    .await
+}
+
+async fn store_watch_history_items(
+    pool: &WebData,
     account_id: &str,
-    item: ExtendedWatchHistoryItem,
-) -> HandlerResult<ExtendedWatchHistoryItem> {
-    let item = prepare_watch_history_item(conn, account_id, item).await?;
-    persist_watch_history_item(conn, &item).await?;
-    Ok(item)
+    items: Vec<ExtendedWatchHistoryItem>,
+) -> HandlerResult<Vec<ExtendedWatchHistoryItem>> {
+    let items = prepare_watch_history_items(pool, account_id, items).await?;
+
+    let mut conn = get_db_conn!(pool);
+    persist_watch_history_items(&mut conn, &items).await?;
+
+    Ok(items)
 }
 
 #[utoipa::path(responses((status = OK)), security(("api_jwt_token" = [])))]
@@ -90,24 +165,10 @@ async fn add_to_watch_history_bulk(
     pool: WebData,
     items: web::Json<Vec<ExtendedWatchHistoryItem>>,
 ) -> HandlerResult<impl Responder> {
-    let mut conn = get_db_conn!(pool);
     let items = items.into_inner();
-    let mut prepared_items = Vec::with_capacity(items.len());
+    check_bulk_size(items.len())?;
 
-    for item in items {
-        prepared_items.push(prepare_watch_history_item(&mut conn, &account.id, item).await?);
-    }
-
-    conn.transaction::<_, HandlerError, _>(|conn| {
-        async move {
-            for item in &prepared_items {
-                persist_watch_history_item(conn, item).await?;
-            }
-            Ok(())
-        }
-        .scope_boxed()
-    })
-    .await?;
+    store_watch_history_items(&pool, &account.id, items).await?;
 
     Ok(HttpResponse::Ok())
 }
@@ -199,12 +260,11 @@ async fn add_to_watch_history(
     pool: WebData,
     watch_history_item: web::Json<ExtendedWatchHistoryItem>,
 ) -> HandlerResult<impl Responder> {
-    let mut conn = get_db_conn!(pool);
+    let mut stored =
+        store_watch_history_items(&pool, &account.id, vec![watch_history_item.into_inner()])
+            .await?;
 
-    let watch_history_item =
-        store_watch_history_item(&mut conn, &account.id, watch_history_item.into_inner()).await?;
-
-    Ok(HttpResponse::Ok().json(watch_history_item))
+    Ok(HttpResponse::Ok().json(stored.pop()))
 }
 
 #[utoipa::path(responses((status = OK)), security(("api_jwt_token" = [])))]

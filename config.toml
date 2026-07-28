@@ -1,4 +1,9 @@
 database_url = "./db.sqlite"
-secret_key = "changeme"
+# Generate with `openssl rand -hex 32`. The server refuses to start on a
+# placeholder value or anything shorter than 32 bytes.
+secret_key = ""
+# Set this to the same value as secret_key above. Keeping it separate is what
+# allows secret_key to be rotated later without locking out every account.
+username_secret = ""
 allow_registration = true
 validate_submitted_metadata = true

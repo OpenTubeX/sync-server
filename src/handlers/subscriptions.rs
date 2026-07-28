@@ -5,6 +5,7 @@ use utoipa_actix_web::scope;
 use crate::{
     DbConnection, WebData,
     database::{
+        quota::count_subscriptions,
         subscription::{
             add_subscription_by_account_id, get_subscription_channel_by_account_id,
             get_subscriptions_by_account_id, remove_subscription_by_account_id,
@@ -19,9 +20,12 @@ use crate::{
     },
     dto::ExtendedSubscriptionGroup,
     get_db_conn,
-    handlers::{HandlerError, HandlerResult, ScopedHandler, user::auth_middleware},
+    handlers::{
+        HandlerError, HandlerResult, ScopedHandler, check_bulk_size, check_row_quota,
+        user::auth_middleware,
+    },
     models::{Account, Channel, SubscriptionGroup},
-    validation::validate_channel_information_if_changed,
+    validation::{channels_requiring_validation, validate_channel_against_youtube},
 };
 
 pub struct SubscriptionsHandler {}
@@ -74,13 +78,26 @@ async fn subscribe_bulk(
     pool: WebData,
     channels: web::Json<Vec<Channel>>,
 ) -> HandlerResult<impl Responder> {
-    let mut conn = get_db_conn!(pool);
     let mut channels = channels.into_inner();
+    check_bulk_size(channels.len())?;
 
-    for channel in &mut channels {
-        validate_channel_information_if_changed(&mut conn, channel).await?;
+    // Work out what needs validating, then release the connection before the
+    // network round-trips so that a slow batch cannot hold one for minutes.
+    let pending = {
+        let mut conn = get_db_conn!(pool);
+        check_row_quota(
+            count_subscriptions(&mut conn, &account.id)
+                .await
+                .map_err(|_| HandlerError::InternalDatabaseError)?,
+            channels.len(),
+        )?;
+        channels_requiring_validation(&mut conn, &channels).await
+    };
+    for index in pending {
+        validate_channel_against_youtube(&mut channels[index]).await?;
     }
 
+    let mut conn = get_db_conn!(pool);
     conn.transaction::<_, HandlerError, _>(|conn| {
         async move {
             for channel in &channels {
@@ -122,12 +139,27 @@ async fn subscribe(
     pool: WebData,
     channel: web::Json<Channel>,
 ) -> HandlerResult<impl Responder> {
-    let mut conn = get_db_conn!(pool);
-
     let mut channel = channel.into_inner();
-    // verify that the provided information is valid
-    validate_channel_information_if_changed(&mut conn, &mut channel).await?;
 
+    // verify that the provided information is valid, without holding a
+    // connection across the YouTube round-trip
+    let needs_validation = {
+        let mut conn = get_db_conn!(pool);
+        check_row_quota(
+            count_subscriptions(&mut conn, &account.id)
+                .await
+                .map_err(|_| HandlerError::InternalDatabaseError)?,
+            1,
+        )?;
+        !channels_requiring_validation(&mut conn, std::slice::from_ref(&channel))
+            .await
+            .is_empty()
+    };
+    if needs_validation {
+        validate_channel_against_youtube(&mut channel).await?;
+    }
+
+    let mut conn = get_db_conn!(pool);
     match add_subscription_by_account_id(&mut conn, &channel, &account.id).await {
         Ok(_) => Ok(HttpResponse::Ok()),
         Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(

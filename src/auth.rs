@@ -21,13 +21,14 @@ pub fn bytes_to_hex_string(bytes: &[u8]) -> String {
 
 pub fn generate_jwt(account: &Account, secret_key: &[u8]) -> jsonwebtoken::errors::Result<String> {
     let key = EncodingKey::from_secret(secret_key);
-    // tokens are valid for one year, should be enough in most cases
+    // tokens are valid for one year, should be enough in most cases.
+    // `exp` is defined in seconds since the epoch, not milliseconds.
     let expiration_date = SystemTime::now()
         .checked_add(Duration::from_hours(365 * 24))
         .unwrap()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_millis();
+        .as_secs();
 
     let claims = JwtClaims {
         sub: account.id.clone(),

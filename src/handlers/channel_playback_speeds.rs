@@ -3,12 +3,17 @@ use utoipa_actix_web::scope;
 
 use crate::{
     WebData,
-    database::channel_playback_speed::{
-        get_channel_playback_speeds_by_account_id, remove_channel_playback_speed,
-        set_channel_playback_speed,
+    database::{
+        channel_playback_speed::{
+            get_channel_playback_speeds_by_account_id, remove_channel_playback_speed,
+            set_channel_playback_speed,
+        },
+        quota::count_playback_speeds,
     },
     get_db_conn,
-    handlers::{HandlerError, HandlerResult, ScopedHandler, user::auth_middleware},
+    handlers::{
+        HandlerError, HandlerResult, ScopedHandler, check_row_quota, user::auth_middleware,
+    },
     models::{Account, ChannelPlaybackSpeed},
 };
 
@@ -63,6 +68,12 @@ async fn put_channel_playback_speed(
 
     speed.account_id = account.id;
     let mut conn = get_db_conn!(pool);
+    check_row_quota(
+        count_playback_speeds(&mut conn, &speed.account_id)
+            .await
+            .map_err(|_| HandlerError::InternalDatabaseError)?,
+        1,
+    )?;
     set_channel_playback_speed(&mut conn, &speed)
         .await
         .map_err(|_| HandlerError::InternalDatabaseError)?;

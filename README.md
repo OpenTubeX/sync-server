@@ -44,10 +44,22 @@ There are two ways to configure `sync-server`
 | Config option                   | Description                                          | Default | Example              |
 | ----------------------          | ---------------------------------------------------- | ------- | -------------------- |
 | `database_url`                  | Connection string for the database                   | None    | sqlite://./db.sql    |
-| `secret_key`                    | Used to sign authentication tokens                   | None    | SomeVeryLongString64 |
+| `secret_key`                    | Used to sign authentication tokens. Required, min. 32 bytes | None | output of `openssl rand -hex 32` |
+| `username_secret`               | Used to derive account name hashes. Set it so that `secret_key` stays rotatable | falls back to `secret_key` | output of `openssl rand -hex 32` |
 | `allow_registration`            | Whether to allow registering on this server          | `true`  | `false`              |
 | `validate_submitted_metadata`   | Whether to check incoming video data against YouTube | `true`  | `false`              |
 | `migration_approval`            | Exact comma-separated pending migration versions approved for an existing database after separately verifying a backup | None | `2026-07-21-180000-0000` |
+
+### Secrets
+
+The server refuses to start if `secret_key` is missing, shorter than 32 bytes, or
+left at a placeholder such as `changeme`. Generate one with `openssl rand -hex 32`.
+
+Accounts are looked up by `HMAC(username)`, so changing the secret that derives
+that hash makes every existing account unreachable. Set `username_secret`
+explicitly (initially to the same value as `secret_key`) so that `secret_key`
+itself can later be rotated — for example after a suspected leak — without
+locking anyone out.
 
 Existing databases never apply pending migrations implicitly. After you create and verify
 a separate backup, `migration_approval` must exactly match every pending version. SQLite

@@ -34,6 +34,7 @@ mod dto;
 mod handlers;
 mod models;
 mod openapi;
+mod rate_limit;
 mod schema;
 mod validation;
 
@@ -121,8 +122,11 @@ async fn initialize_db_pool(db_url: &str) -> Result<DbPool, PoolError> {
             let url = url.to_owned();
             Box::pin(async move {
                 let mut conn = DbConnection::establish(&url).await?;
+                // `foreign_keys` defaults to OFF in SQLite and must be enabled per
+                // connection, otherwise none of the ON DELETE CASCADE constraints
+                // fire and deleting an account orphans all of its rows.
                 conn.batch_execute(
-                    "PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 30000; PRAGMA synchronous = NORMAL;",
+                    "PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 30000; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;",
                 )
                 .await
                 .map_err(|err| diesel::ConnectionError::BadConnection(err.to_string()))?;
