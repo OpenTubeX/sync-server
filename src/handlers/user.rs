@@ -45,10 +45,10 @@ impl ScopedHandler for UserHandler {
         // scope is rate limited to blunt password guessing and registration spam.
         // Note this must wrap the outer scope: an extra nested `scope("")` would
         // match the prefix of, and therefore swallow, its sibling's routes.
+        // The limiter itself is registered once on the App, not here: this
+        // function runs per worker, so building it here would give every worker
+        // its own counters and multiply the effective limit by the worker count.
         scope::scope("/account")
-            .app_data(web::Data::new(
-                RateLimiter::default().trusting_forwarded_for(CONFIG.trust_forwarded_for),
-            ))
             .wrap(actix_web::middleware::from_fn(rate_limit_middleware))
             .service(register_account)
             .service(login_account)
@@ -455,6 +455,46 @@ mod tests {
             };
             assert_eq!(got, want, "client {client}");
         }
+    }
+
+    /// Mirrors production wiring: the limiter is registered on the App, and the
+    /// middleware on a scope. A limiter built inside the per-worker closure
+    /// instead would give each worker its own counters.
+    #[actix_rt::test]
+    async fn app_level_limiter_is_visible_to_scope_middleware() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(RateLimiter::new(
+                    1,
+                    Duration::from_secs(3600),
+                )))
+                .service(
+                    web::scope("/t")
+                        .wrap(actix_web::middleware::from_fn(rate_limit_middleware))
+                        .service(ping),
+                ),
+        )
+        .await;
+
+        let peer: SocketAddr = "203.0.113.20:5000".parse().unwrap();
+        let call = |uri: &'static str| {
+            test::TestRequest::get()
+                .uri(uri)
+                .peer_addr(peer)
+                .to_request()
+        };
+
+        let first = match test::try_call_service(&app, call("/t/ping")).await {
+            Ok(response) => response.status(),
+            Err(error) => error.as_response_error().status_code(),
+        };
+        let second = match test::try_call_service(&app, call("/t/ping")).await {
+            Ok(response) => response.status(),
+            Err(error) => error.as_response_error().status_code(),
+        };
+
+        assert_eq!(first, StatusCode::OK);
+        assert_eq!(second, StatusCode::TOO_MANY_REQUESTS);
     }
 
     /// Guards against the middleware silently failing open, which would happen

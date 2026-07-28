@@ -23,7 +23,7 @@ services:
       - "VALIDATE_SUBMITTED_METADATA=true"
       # Existing databases refuse pending migrations unless this exactly lists
       # every pending migration version. Create and verify a backup before approval.
-      # - "MIGRATION_APPROVAL=2026-07-21-180000-0000"
+      # - "MIGRATION_APPROVAL=202607211800000000"
     volumes:
       # The container runs as uid 10001 and this bind mount keeps host
       # ownership, so create and chown the directory before the first start:

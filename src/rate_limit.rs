@@ -7,6 +7,11 @@
 //! The counters are per process and in memory. That is enough to blunt abuse
 //! from a single source; an operator running multiple replicas or needing
 //! stronger guarantees should also rate limit at the reverse proxy.
+//!
+//! Register the limiter once on the `App` and share it. `HttpServer::new` runs
+//! its factory once per worker, so a limiter built in there would give each
+//! worker independent counters and multiply the effective limit by the worker
+//! count.
 
 use std::collections::HashMap;
 use std::net::IpAddr;

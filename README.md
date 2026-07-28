@@ -49,7 +49,7 @@ There are two ways to configure `sync-server`
 | `trust_forwarded_for`           | Derive rate limiting client addresses from `X-Forwarded-For`. Required behind a reverse proxy | `false` | `true` |
 | `allow_registration`            | Whether to allow registering on this server          | `true`  | `false`              |
 | `validate_submitted_metadata`   | Whether to check incoming video data against YouTube | `true`  | `false`              |
-| `migration_approval`            | Exact comma-separated pending migration versions approved for an existing database after separately verifying a backup | None | `2026-07-21-180000-0000` |
+| `migration_approval`            | Exact comma-separated pending migration versions approved for an existing database after separately verifying a backup | None | `202607211800000000` |
 
 ### Running behind a reverse proxy
 
@@ -117,7 +117,10 @@ itself can later be rotated — for example after a suspected leak — without
 locking anyone out.
 
 Existing databases never apply pending migrations implicitly. After you create and verify
-a separate backup, `migration_approval` must exactly match every pending version. SQLite
+a separate backup, `migration_approval` must exactly match every pending version.
+Versions are digits only, without the hyphens used in the migration directory
+names — the startup error prints the exact value to use, so the simplest approach
+is to start the server once and copy it from the log. SQLite
 also creates a consistent `*.pre-migration-<version>` backup immediately before changing
 the schema. Remove the approval after deployment so it cannot authorize a later migration.
 

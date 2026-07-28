@@ -84,11 +84,19 @@ async fn main() -> io::Result<()> {
 
     log::info!("starting HTTP server at http://localhost:8080");
 
+    // Built once and shared, because the closure below runs per worker. Building
+    // it inside would give each worker separate counters, multiplying the
+    // effective rate limit by the number of workers.
+    let rate_limiter = web::Data::new(
+        rate_limit::RateLimiter::default().trusting_forwarded_for(CONFIG.trust_forwarded_for),
+    );
+
     HttpServer::new(move || {
         let (app, generated_api) = App::new()
             .into_utoipa_app()
             // add DB pool handle to app data; enables use of `web::Data<DbPool>` extractor
             .app_data(web::Data::new(pool.clone()))
+            .app_data(rate_limiter.clone())
             .service(
                 utoipa_actix_web::scope("/v1")
                     .service(UserHandler::get_service())
