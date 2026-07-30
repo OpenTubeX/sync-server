@@ -1,6 +1,6 @@
 -- Your SQL goes here
-DROP TABLE IF EXISTS playlist;
-DROP TABLE IF EXISTS playlist_video_member;
+DROP TABLE IF EXISTS playlist CASCADE;
+DROP TABLE IF EXISTS playlist_video_member CASCADE;
 
 CREATE TABLE playlist(
 	id VARCHAR NOT NULL,
