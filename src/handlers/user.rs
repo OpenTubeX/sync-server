@@ -246,7 +246,7 @@ struct OidcCallbackData {
     state: String,
 }
 
-#[utoipa::path(responses((status = CREATED, body = LoginResponse)))]
+#[utoipa::path]
 #[get("/oidc/authenticate/callback")]
 async fn authenticate_oidc_account_callback(
     pool: WebData,
@@ -312,7 +312,7 @@ async fn delete_oidc_account(
     Ok(Redirect::to(redirect_url))
 }
 
-#[utoipa::path(responses((status = CREATED, body = LoginResponse)))]
+#[utoipa::path]
 #[get("/oidc/delete/callback")]
 async fn delete_oidc_account_callback(
     pool: WebData,
