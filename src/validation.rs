@@ -26,6 +26,10 @@ const ALLOWED_THUMBNAIL_DOMAINS: [&str; 5] = [
 ];
 
 fn verify_image_url(image_url: &str) -> bool {
+    if image_url.is_empty() {
+        return true;
+    }
+
     let Ok(url) = url::Url::parse(image_url) else {
         return false;
     };
