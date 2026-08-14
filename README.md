@@ -1,5 +1,5 @@
 # OpenTubeX Sync Server
-Server to synchronize OpenTubeX data between devices, including subscriptions, playlists, watch history, and channel playback speeds.
+Server to synchronize OpenTubeX data between devices, including subscriptions, playlists, watch history, profiles, sessions, and settings.
 
 OpenTubeX clients can use the encrypted sync API exposed by this server. In
 that mode all synchronized content is encrypted on the client with a separate
@@ -13,6 +13,19 @@ legacy plaintext sync records are removed. This cannot erase server backups
 that may already exist. After that first upload, plaintext sync endpoints are
 rejected for the account so an older client cannot accidentally repopulate
 readable data.
+
+## Deprecated playback-speed API
+
+The dedicated `/v1/channel_playback_speeds` endpoints and encrypted
+`playbackSpeeds` collection are deprecated. Current OpenTubeX clients store all
+saved channel preferences, including playback speeds, in the encrypted
+`settings` collection.
+
+Both deprecated forms remain fully functional during the client migration
+period. Their database table, encrypted collection support, legacy migration,
+and cleanup logic must only be removed after supported clients no longer use
+them. Responses from the dedicated plaintext endpoints include the standard
+`Deprecation` header; no removal date has been scheduled.
 
 This project is based on the [LibreTube sync server](https://github.com/libre-tube/sync-server).
 

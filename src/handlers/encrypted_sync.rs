@@ -17,6 +17,8 @@ use crate::{WebData, get_db_conn};
 const MEBIBYTE: usize = 1024 * 1024;
 const MAX_ENCRYPTED_SYNC_BYTES: usize = 64 * MEBIBYTE;
 const MAX_ENCRYPTED_SYNC_ACCOUNT_BYTES: usize = 128 * MEBIBYTE;
+// `playbackSpeeds` is deprecated for new clients, but remains part of legacy
+// document migration until older OpenTubeX versions have been phased out.
 const LEGACY_ENCRYPTED_COLLECTIONS: [&str; 6] = [
     "subscriptions",
     "playlists",
@@ -62,6 +64,8 @@ pub(crate) fn sync_capabilities() -> SyncCapabilities {
 fn collection_limit(collection: &str) -> HandlerResult<usize> {
     match collection {
         "settings" => Ok(2 * MEBIBYTE),
+        // Deprecated compatibility collection. Saved channel preferences now
+        // belong in `settings`; keep accepting this while old clients remain.
         "sessions" | "profiles" | "playbackSpeeds" => Ok(8 * MEBIBYTE),
         "subscriptions" | "playlistBookmarks" => Ok(16 * MEBIBYTE),
         "playlists" | "history" => Ok(MAX_ENCRYPTED_SYNC_BYTES),
