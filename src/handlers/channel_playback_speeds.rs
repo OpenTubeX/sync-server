@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use actix_web::{HttpResponse, Responder, delete, get, middleware::from_fn, put, web};
 use diesel_async::{AsyncConnection, scoped_futures::ScopedFutureExt};
 use utoipa_actix_web::scope;
@@ -17,6 +19,8 @@ use crate::{
     },
     models::{Account, ChannelPlaybackSpeed},
 };
+
+const DEPRECATION_HEADER: (&str, &str) = ("Deprecation", "@1786665600");
 
 pub struct ChannelPlaybackSpeedsHandler;
 
@@ -38,6 +42,11 @@ impl ScopedHandler for ChannelPlaybackSpeedsHandler {
     }
 }
 
+/// Get saved channel playback speeds through the deprecated dedicated API.
+///
+/// New OpenTubeX clients sync saved channel preferences through the encrypted
+/// `settings` collection. This endpoint remains available for older clients.
+#[deprecated(note = "use the encrypted settings collection for saved channel preferences")]
 #[utoipa::path(responses((status = OK, body = Vec<ChannelPlaybackSpeed>)), security(("api_jwt_token" = [])))]
 #[get("/")]
 async fn get_channel_playback_speeds(
@@ -49,9 +58,16 @@ async fn get_channel_playback_speeds(
         .await
         .map_err(|_| HandlerError::InternalDatabaseError)?;
 
-    Ok(HttpResponse::Ok().json(speeds))
+    Ok(HttpResponse::Ok()
+        .insert_header(DEPRECATION_HEADER)
+        .json(speeds))
 }
 
+/// Save a channel playback speed through the deprecated dedicated API.
+///
+/// New OpenTubeX clients sync saved channel preferences through the encrypted
+/// `settings` collection. This endpoint remains available for older clients.
+#[deprecated(note = "use the encrypted settings collection for saved channel preferences")]
 #[utoipa::path(responses((status = OK, body = ChannelPlaybackSpeed)), security(("api_jwt_token" = [])))]
 #[put("/")]
 async fn put_channel_playback_speed(
@@ -71,7 +87,9 @@ async fn put_channel_playback_speed(
     let mut conn = get_db_conn!(pool);
     store_playback_speed(&mut conn, &speed).await?;
 
-    Ok(HttpResponse::Ok().json(speed))
+    Ok(HttpResponse::Ok()
+        .insert_header(DEPRECATION_HEADER)
+        .json(speed))
 }
 
 /// Store a playback speed, enforcing the row quota in the same transaction.
@@ -103,6 +121,11 @@ async fn store_playback_speed(
     .await
 }
 
+/// Delete a channel playback speed through the deprecated dedicated API.
+///
+/// New OpenTubeX clients sync saved channel preferences through the encrypted
+/// `settings` collection. This endpoint remains available for older clients.
+#[deprecated(note = "use the encrypted settings collection for saved channel preferences")]
 #[utoipa::path(responses((status = OK)), security(("api_jwt_token" = [])))]
 #[delete("/{channel_id}")]
 async fn delete_channel_playback_speed(
@@ -115,5 +138,7 @@ async fn delete_channel_playback_speed(
         .await
         .map_err(|_| HandlerError::InternalDatabaseError)?;
 
-    Ok(HttpResponse::Ok())
+    Ok(HttpResponse::Ok()
+        .insert_header(DEPRECATION_HEADER)
+        .finish())
 }
