@@ -1,10 +1,13 @@
 #![allow(deprecated)]
 
+use std::fmt::{Display, Formatter};
+
 use actix_web::{
     HttpResponse, Responder,
     body::MessageBody,
     delete,
     dev::{ServiceRequest, ServiceResponse},
+    error::ResponseError,
     get,
     http::header::{HeaderName, HeaderValue},
     middleware::{Next, from_fn},
@@ -31,6 +34,27 @@ use crate::{
 
 const DEPRECATION_DATE: &str = "@1786665600";
 
+#[derive(Debug)]
+struct DeprecatedEndpointError(actix_web::Error);
+
+impl Display for DeprecatedEndpointError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(&self.0, formatter)
+    }
+}
+
+impl ResponseError for DeprecatedEndpointError {
+    fn status_code(&self) -> actix_web::http::StatusCode {
+        self.0.as_response_error().status_code()
+    }
+
+    fn error_response(&self) -> HttpResponse {
+        let mut response = self.0.error_response();
+        add_deprecation_header(response.headers_mut());
+        response
+    }
+}
+
 pub struct ChannelPlaybackSpeedsHandler;
 
 impl ScopedHandler for ChannelPlaybackSpeedsHandler {
@@ -56,12 +80,16 @@ async fn deprecation_middleware(
     req: ServiceRequest,
     next: Next<impl MessageBody>,
 ) -> Result<ServiceResponse<impl MessageBody>, actix_web::Error> {
-    let mut response = next.call(req).await?;
-    response.headers_mut().insert(
+    let mut response = next.call(req).await.map_err(DeprecatedEndpointError)?;
+    add_deprecation_header(response.headers_mut());
+    Ok(response)
+}
+
+fn add_deprecation_header(headers: &mut actix_web::http::header::HeaderMap) {
+    headers.insert(
         HeaderName::from_static("deprecation"),
         HeaderValue::from_static(DEPRECATION_DATE),
     );
-    Ok(response)
 }
 
 /// Get saved channel playback speeds through the deprecated dedicated API.
@@ -163,7 +191,7 @@ async fn delete_channel_playback_speed(
 mod tests {
     use actix_web::{App, HttpResponse, http::StatusCode, middleware::from_fn, test, web};
 
-    use super::{DEPRECATION_DATE, deprecation_middleware};
+    use super::{DEPRECATION_DATE, DeprecatedEndpointError, deprecation_middleware};
     use crate::handlers::{HandlerError, HandlerResult};
 
     async fn success() -> HttpResponse {
@@ -172,6 +200,22 @@ mod tests {
 
     async fn failure() -> HandlerResult<HttpResponse> {
         Err(HandlerError::ValidationError)
+    }
+
+    #[actix_web::test]
+    async fn deprecation_header_is_added_when_inner_middleware_returns_an_error() {
+        let error: actix_web::Error =
+            DeprecatedEndpointError(HandlerError::InvalidToken.into()).into();
+        let response = error.error_response();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response
+                .headers()
+                .get("deprecation")
+                .expect("deprecation header should be present"),
+            DEPRECATION_DATE
+        );
     }
 
     #[actix_web::test]
