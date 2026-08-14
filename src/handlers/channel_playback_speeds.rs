@@ -1,6 +1,15 @@
 #![allow(deprecated)]
 
-use actix_web::{HttpResponse, Responder, delete, get, middleware::from_fn, put, web};
+use actix_web::{
+    HttpResponse, Responder,
+    body::MessageBody,
+    delete,
+    dev::{ServiceRequest, ServiceResponse},
+    get,
+    http::header::{HeaderName, HeaderValue},
+    middleware::{Next, from_fn},
+    put, web,
+};
 use diesel_async::{AsyncConnection, scoped_futures::ScopedFutureExt};
 use utoipa_actix_web::scope;
 
@@ -20,7 +29,7 @@ use crate::{
     models::{Account, ChannelPlaybackSpeed},
 };
 
-const DEPRECATION_HEADER: (&str, &str) = ("Deprecation", "@1786665600");
+const DEPRECATION_DATE: &str = "@1786665600";
 
 pub struct ChannelPlaybackSpeedsHandler;
 
@@ -36,10 +45,23 @@ impl ScopedHandler for ChannelPlaybackSpeedsHandler {
     > {
         scope("/channel_playback_speeds")
             .wrap(from_fn(auth_middleware))
+            .wrap(from_fn(deprecation_middleware))
             .service(get_channel_playback_speeds)
             .service(put_channel_playback_speed)
             .service(delete_channel_playback_speed)
     }
+}
+
+async fn deprecation_middleware(
+    req: ServiceRequest,
+    next: Next<impl MessageBody>,
+) -> Result<ServiceResponse<impl MessageBody>, actix_web::Error> {
+    let mut response = next.call(req).await?;
+    response.headers_mut().insert(
+        HeaderName::from_static("deprecation"),
+        HeaderValue::from_static(DEPRECATION_DATE),
+    );
+    Ok(response)
 }
 
 /// Get saved channel playback speeds through the deprecated dedicated API.
@@ -58,9 +80,7 @@ async fn get_channel_playback_speeds(
         .await
         .map_err(|_| HandlerError::InternalDatabaseError)?;
 
-    Ok(HttpResponse::Ok()
-        .insert_header(DEPRECATION_HEADER)
-        .json(speeds))
+    Ok(HttpResponse::Ok().json(speeds))
 }
 
 /// Save a channel playback speed through the deprecated dedicated API.
@@ -87,9 +107,7 @@ async fn put_channel_playback_speed(
     let mut conn = get_db_conn!(pool);
     store_playback_speed(&mut conn, &speed).await?;
 
-    Ok(HttpResponse::Ok()
-        .insert_header(DEPRECATION_HEADER)
-        .json(speed))
+    Ok(HttpResponse::Ok().json(speed))
 }
 
 /// Store a playback speed, enforcing the row quota in the same transaction.
@@ -138,7 +156,49 @@ async fn delete_channel_playback_speed(
         .await
         .map_err(|_| HandlerError::InternalDatabaseError)?;
 
-    Ok(HttpResponse::Ok()
-        .insert_header(DEPRECATION_HEADER)
-        .finish())
+    Ok(HttpResponse::Ok().finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use actix_web::{App, HttpResponse, http::StatusCode, middleware::from_fn, test, web};
+
+    use super::{DEPRECATION_DATE, deprecation_middleware};
+    use crate::handlers::{HandlerError, HandlerResult};
+
+    async fn success() -> HttpResponse {
+        HttpResponse::Ok().finish()
+    }
+
+    async fn failure() -> HandlerResult<HttpResponse> {
+        Err(HandlerError::ValidationError)
+    }
+
+    #[actix_web::test]
+    async fn deprecation_header_is_added_to_success_and_error_responses() {
+        let app = test::init_service(
+            App::new()
+                .wrap(from_fn(deprecation_middleware))
+                .route("/success", web::get().to(success))
+                .route("/failure", web::get().to(failure)),
+        )
+        .await;
+
+        for (path, expected_status) in [
+            ("/success", StatusCode::OK),
+            ("/failure", StatusCode::BAD_REQUEST),
+        ] {
+            let response =
+                test::call_service(&app, test::TestRequest::get().uri(path).to_request()).await;
+
+            assert_eq!(response.status(), expected_status);
+            assert_eq!(
+                response
+                    .headers()
+                    .get("deprecation")
+                    .expect("deprecation header should be present"),
+                DEPRECATION_DATE
+            );
+        }
+    }
 }
