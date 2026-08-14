@@ -14,7 +14,7 @@ that may already exist. After that first upload, plaintext sync endpoints are
 rejected for the account so an older client cannot accidentally repopulate
 readable data.
 
-### Deprecated playback-speed API
+## Deprecated playback-speed API
 
 The dedicated `/v1/channel_playback_speeds` endpoints and encrypted
 `playbackSpeeds` collection are deprecated. Current OpenTubeX clients store all
