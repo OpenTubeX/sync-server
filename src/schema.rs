@@ -13,7 +13,8 @@ diesel::table! {
     account (id) {
         id -> Text,
         name_hash -> Text,
-        password_hash -> Text,
+        password_hash -> Nullable<Text>,
+        oidc_sub -> Nullable<Text>,
     }
 }
 
@@ -21,7 +22,7 @@ diesel::table! {
     channel (id) {
         id -> Text,
         name -> Text,
-        avatar -> Text,
+        avatar -> Nullable<Text>,
         verified -> Bool,
     }
 }

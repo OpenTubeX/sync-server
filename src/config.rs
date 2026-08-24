@@ -24,6 +24,14 @@ const PLACEHOLDER_SECRETS: [&str; 5] = [
 ];
 
 #[derive(serde::Deserialize, Clone)]
+pub struct OidcConfig {
+    pub provider_url: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub app_url: String,
+}
+
+#[derive(serde::Deserialize, Clone)]
 pub struct Config {
     #[serde(rename = "secret_key")]
     pub secret: String,
@@ -57,6 +65,8 @@ pub struct Config {
     pub database_url: String,
     #[serde(default)]
     pub migration_approval: Option<String>,
+    #[serde(default)]
+    pub oidc: Option<OidcConfig>,
 }
 
 impl Config {
@@ -149,6 +159,7 @@ mod tests {
             validate_submitted_metadata: true,
             database_url: "./db.sqlite".to_owned(),
             migration_approval: None,
+            oidc: None,
         }
     }
 

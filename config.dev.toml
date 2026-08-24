@@ -1,0 +1,19 @@
+database_url = "./db.sqlite"
+# Generate with `openssl rand -hex 32`. The server refuses to start on a
+# placeholder value or anything shorter than 32 bytes.
+secret_key = ""
+# Set this to the same value as secret_key above. Keeping it separate allows
+# secret_key to be rotated later without locking out every account.
+# username_secret = ""
+# Enable only when the server is reachable exclusively through a reverse proxy.
+# trust_forwarded_for = true
+# trusted_proxy_hops = 1
+allow_registration = true
+validate_submitted_metadata = true
+
+# Remove this section if OIDC is not configured.
+[oidc]
+provider_url = "http://localhost:9400"
+client_id = "changeme"
+client_secret = "changeme"
+app_url = "http://localhost:8080"

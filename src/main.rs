@@ -28,6 +28,7 @@ use crate::{
         playlist_bookmarks::PlaylistBookmarksHandler, playlists::PlaylistsHandler,
         subscriptions::SubscriptionsHandler, user::UserHandler, watch_history::WatchHistoryHandler,
     },
+    oidc::init_oidc,
     openapi::ApiDoc,
 };
 
@@ -37,6 +38,7 @@ mod database;
 mod dto;
 mod handlers;
 mod models;
+mod oidc;
 mod openapi;
 mod rate_limit;
 mod schema;
@@ -50,10 +52,13 @@ static CONFIG: LazyLock<config::Config> = LazyLock::new(|| match config::build_c
     }
 });
 
-pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations/");
-
 #[cfg(all(feature = "sqlite", feature = "postgres"))]
 compile_error!("Sqlite and Postgres are mutually exclusive and cannot be enabled together");
+
+#[cfg(feature = "sqlite")]
+pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations/sqlite/");
+#[cfg(feature = "postgres")]
+pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations/postgres/");
 
 #[cfg(feature = "sqlite")]
 type DbConnection =
@@ -81,6 +86,10 @@ async fn main() -> io::Result<()> {
         CONFIG.migration_approval.as_deref(),
     )
     .await;
+
+    if let Some(oidc) = &CONFIG.oidc {
+        init_oidc(oidc).await;
+    }
 
     log::info!("starting HTTP server at http://localhost:8080");
 

@@ -9,7 +9,7 @@ use actix_web::{
 };
 use utoipa_actix_web::scope::Scope;
 
-use crate::models::Account;
+use crate::{models::Account, oidc::OidcError};
 
 pub mod channel_playback_speeds;
 pub mod encrypted_sync;
@@ -74,6 +74,10 @@ pub enum HandlerError {
     EncryptedSyncRequired,
     #[error("failed to load data from YouTube")]
     YouTubeConnectError,
+    #[error("{0}")]
+    OidcError(OidcError),
+    #[error("account doesn't support logging in via password")]
+    PasswordLoginDisabledForAccount,
 }
 
 impl ResponseError for HandlerError {
@@ -105,6 +109,8 @@ impl ResponseError for HandlerError {
             Self::EncryptedSyncQuotaExceeded => StatusCode::PAYLOAD_TOO_LARGE,
             Self::EncryptedSyncRequired => StatusCode::CONFLICT,
             Self::YouTubeConnectError => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::OidcError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::PasswordLoginDisabledForAccount => StatusCode::BAD_REQUEST,
         }
     }
 }
