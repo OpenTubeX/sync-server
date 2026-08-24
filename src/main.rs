@@ -278,6 +278,36 @@ async fn run_migrations(pool: &DbPool, database_url: &str, approval: Option<&str
 mod tests {
     use super::require_migration_approval;
 
+    #[cfg(feature = "sqlite")]
+    #[derive(diesel::QueryableByName)]
+    struct RowCount {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        count: i64,
+    }
+
+    #[cfg(feature = "sqlite")]
+    fn table_count(conn: &mut diesel::SqliteConnection, table: &str) -> i64 {
+        use diesel::RunQueryDsl;
+
+        diesel::sql_query(format!("SELECT COUNT(*) AS count FROM {table}"))
+            .get_result::<RowCount>(conn)
+            .unwrap()
+            .count
+    }
+
+    #[cfg(feature = "sqlite")]
+    fn foreign_keys_enabled(conn: &mut diesel::SqliteConnection) -> bool {
+        use diesel::RunQueryDsl;
+
+        diesel::sql_query(
+            "SELECT COUNT(*) AS count FROM pragma_foreign_keys WHERE foreign_keys = 1",
+        )
+        .get_result::<RowCount>(conn)
+        .unwrap()
+        .count
+            == 1
+    }
+
     #[test]
     fn fresh_database_does_not_require_approval() {
         assert!(require_migration_approval(false, &["20260721".to_owned()], None).is_ok());
@@ -289,5 +319,49 @@ mod tests {
         assert!(require_migration_approval(true, &pending, None).is_err());
         assert!(require_migration_approval(true, &pending, Some("20260721")).is_err());
         assert!(require_migration_approval(true, &pending, Some("20260721,20260722")).is_ok());
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn channel_migration_preserves_referencing_rows() {
+        use diesel::Connection;
+        use diesel::connection::SimpleConnection;
+        use diesel_migrations::MigrationHarness;
+
+        let mut conn = diesel::SqliteConnection::establish(":memory:").unwrap();
+        conn.batch_execute("PRAGMA foreign_keys = ON;").unwrap();
+
+        let migrations = conn.pending_migrations(super::MIGRATIONS).unwrap();
+        let channel_migration = migrations
+            .iter()
+            .position(|migration| migration.name().version().to_string() == "202608181323460000")
+            .expect("channel migration must be embedded");
+
+        conn.run_migrations(&migrations[..channel_migration])
+            .unwrap();
+        conn.batch_execute(
+            "INSERT INTO channel (id, name, avatar, verified) \
+             VALUES ('channel-1', 'Channel', 'https://example.test/avatar', false); \
+             INSERT INTO video (id, title, upload_date, uploader_id, thumbnail_url, duration) \
+             VALUES ('video-1', 'Video', 0, 'channel-1', \
+                     'https://example.test/thumbnail', 60);",
+        )
+        .unwrap();
+
+        assert_eq!(table_count(&mut conn, "video"), 1);
+        conn.run_migration(migrations[channel_migration].as_ref())
+            .unwrap();
+        assert!(foreign_keys_enabled(&mut conn));
+        assert_eq!(table_count(&mut conn, "channel"), 1);
+        assert_eq!(table_count(&mut conn, "video"), 1);
+
+        conn.batch_execute("UPDATE channel SET avatar = NULL;")
+            .unwrap();
+        conn.revert_migration(migrations[channel_migration].as_ref())
+            .unwrap();
+        assert!(foreign_keys_enabled(&mut conn));
+        assert_eq!(table_count(&mut conn, "channel"), 1);
+        assert_eq!(table_count(&mut conn, "video"), 1);
+        assert_eq!(table_count(&mut conn, "pragma_foreign_key_check"), 0);
     }
 }
