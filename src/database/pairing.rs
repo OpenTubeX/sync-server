@@ -27,6 +27,12 @@ pub enum ClaimResult {
     LimitExceeded,
 }
 
+pub async fn delete_expired(conn: &mut DbConnection, now: i64) -> Result<usize, DbError> {
+    diesel::delete(pairing_session.filter(expires_at.le(now)))
+        .execute(conn)
+        .await
+}
+
 pub async fn create(
     conn: &mut DbConnection,
     session: &PairingSession,
@@ -34,9 +40,7 @@ pub async fn create(
 ) -> Result<CreateResult, DbError> {
     conn.transaction(|conn| {
         Box::pin(async move {
-            diesel::delete(pairing_session.filter(expires_at.le(now)))
-                .execute(conn)
-                .await?;
+            delete_expired(conn, now).await?;
 
             let active = pairing_session.count().get_result::<i64>(conn).await?;
             if active >= MAX_ACTIVE_SESSIONS {
@@ -75,9 +79,24 @@ pub async fn claim(
                 .set(account::id.eq(account::id))
                 .execute(conn)
                 .await?;
-            diesel::delete(pairing_session.filter(expires_at.le(now)))
-                .execute(conn)
-                .await?;
+            delete_expired(conn, now).await?;
+
+            let existing = pairing_session
+                .filter(id.eq(&request.id))
+                .filter(version.eq(request.version))
+                .filter(account_id.eq(owner_id))
+                .filter(recipient_public_key.eq(&request.recipient_public_key))
+                .filter(recipient_device_id.eq(&request.recipient_device_id))
+                .filter(recipient_device_name.eq(&request.recipient_device_name))
+                .filter(expires_at.gt(now))
+                .filter(encrypted_payload.is_null())
+                .select(PairingSession::as_select())
+                .first(conn)
+                .await
+                .optional()?;
+            if let Some(session) = existing {
+                return Ok(ClaimResult::Claimed(Box::new(session)));
+            }
 
             let active = pairing_session
                 .filter(account_id.eq(owner_id))
@@ -213,7 +232,9 @@ mod tests {
     use diesel_async::AsyncConnection;
     use diesel_migrations::MigrationHarness;
 
-    use super::{ClaimResult, CreateResult, approve, cancel, claim, consume, create, get};
+    use super::{
+        ClaimResult, CreateResult, approve, cancel, claim, consume, create, delete_expired, get,
+    };
     use crate::models::PairingSession;
     use crate::{DbConnection, MIGRATIONS};
 
@@ -350,10 +371,12 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        assert_eq!(delete_expired(&mut conn, 200).await.unwrap(), 1);
         assert_eq!(
             claim(&mut conn, "account-a", &request, 200).await.unwrap(),
             ClaimResult::Conflict
         );
+        assert!(!cancel(&mut conn, "session", "token-session").await.unwrap());
     }
 
     #[actix_rt::test]
@@ -370,6 +393,12 @@ mod tests {
                 ClaimResult::Claimed(_)
             ));
         }
+
+        let retry = session("session-0", 1_000);
+        assert!(matches!(
+            claim(&mut conn, "account-a", &retry, 100).await.unwrap(),
+            ClaimResult::Claimed(_)
+        ));
 
         let excess = session("session-5", 1_000);
         assert_eq!(

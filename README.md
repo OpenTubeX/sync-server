@@ -214,13 +214,14 @@ ID after claim, and approved ciphertext. It never receives the QR-only secret,
 recipient private key, privacy key, or privacy passphrase. Poll, consume, and
 cancel requests send the raw recipient token in a request header; the server
 stores only its hash. The server created the fresh JWT and therefore knows that
-token, but it cannot open or replace the encrypted transfer without the QR-only
-secret.
+token. It can drop or overwrite the encrypted transfer, but it cannot decrypt
+it or forge a valid replacement without the QR-only secret.
 
-Sessions expire after two minutes. The server permits at most 10,000 active
-anonymous sessions globally and five claimed sessions per account. Authenticated
-pairing requests are limited to 120 per account per minute, while anonymous
-creation uses the server's address-based request limiter. Approval accepts an
+Sessions expire after two minutes, and a background task normally deletes them
+within another 30 seconds. The server permits at most 10,000 active pairing
+sessions globally and five claimed sessions per account. Authenticated pairing
+requests are limited to 120 per account per minute, while anonymous creation
+uses the server's address-based request limiter. Claim and approval accept an
 identical retry after success. Consumption atomically returns and deletes the
 ciphertext, and cancellation deletes the session.
 

@@ -41,8 +41,11 @@ The server never receives the QR-only pairing secret, recipient private key,
 privacy key, privacy passphrase, or login password. It creates a fresh
 authentication token for the receiving device during the claim and therefore
 knows that token. The approving device places the token inside the encrypted
-relay payload together with the account name and privacy key. The server cannot
-open or replace that payload without the QR-only secret.
+relay payload together with the account name, privacy key, privacy salt, and
+six-digit verification code. The server can drop or overwrite that ciphertext,
+but it cannot decrypt it or forge a valid replacement without the QR-only
+secret. A background task deletes expired sessions, normally within 30 seconds
+after their two-minute expiry.
 
 **Legacy compatibility.** The server retains plaintext endpoints for older or
 non-OpenTubeX clients. Current OpenTubeX clients do not use them on this public

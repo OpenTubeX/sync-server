@@ -86,6 +86,7 @@ async fn main() -> io::Result<()> {
         CONFIG.migration_approval.as_deref(),
     )
     .await;
+    handlers::pairing::start_expired_session_cleanup(pool.clone());
 
     if let Some(oidc) = &CONFIG.oidc {
         init_oidc(oidc).await;

@@ -36,6 +36,7 @@ const MAX_ENCRYPTED_PAYLOAD_BYTES: usize = 1536;
 const MAX_ENCRYPTED_PAYLOAD_LENGTH: usize = 2048;
 const MAX_PAIRING_REQUESTS_PER_MINUTE: u32 = 120;
 const MAX_TRACKED_ACCOUNTS: usize = 100_000;
+const PAIRING_CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
 
 struct PairingRateWindow {
     started_at: Instant,
@@ -76,6 +77,26 @@ impl PairingRateLimiter {
 static PAIRING_RATE_LIMITER: LazyLock<PairingRateLimiter> = LazyLock::new(|| PairingRateLimiter {
     windows: Mutex::new(HashMap::new()),
 });
+
+pub fn start_expired_session_cleanup(pool: crate::DbPool) {
+    actix_web::rt::spawn(async move {
+        let mut interval = actix_web::rt::time::interval(PAIRING_CLEANUP_INTERVAL);
+        loop {
+            interval.tick().await;
+            let Ok(now) = now_ms() else {
+                log::error!("could not determine the time for pairing-session cleanup");
+                continue;
+            };
+            let Ok(mut conn) = pool.get().await else {
+                log::error!("could not get a database connection for pairing-session cleanup");
+                continue;
+            };
+            if let Err(error) = pairing::delete_expired(&mut conn, now).await {
+                log::error!("could not delete expired pairing sessions: {error}");
+            }
+        }
+    });
+}
 
 pub struct PairingHandler {}
 
