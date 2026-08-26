@@ -10,6 +10,21 @@ diesel::table! {
 }
 
 diesel::table! {
+    pairing_session (id) {
+        id -> Text,
+        version -> SmallInt,
+        account_id -> Nullable<Text>,
+        recipient_public_key -> Text,
+        recipient_device_id -> Text,
+        recipient_device_name -> Text,
+        recipient_token_hash -> Text,
+        approving_device_id -> Nullable<Text>,
+        encrypted_payload -> Nullable<Text>,
+        expires_at -> BigInt,
+    }
+}
+
+diesel::table! {
     account (id) {
         id -> Text,
         name_hash -> Text,
@@ -117,6 +132,7 @@ diesel::table! {
 diesel::joinable!(playlist -> account (account_id));
 diesel::joinable!(channel_playback_speed -> account (account_id));
 diesel::joinable!(encrypted_sync -> account (account_id));
+diesel::joinable!(pairing_session -> account (account_id));
 diesel::joinable!(playlist_bookmark -> account (account_id));
 diesel::joinable!(playlist_bookmark -> public_playlist (public_playlist_id));
 diesel::joinable!(playlist_video_member -> account (account_id));
@@ -136,6 +152,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     channel,
     channel_playback_speed,
     encrypted_sync,
+    pairing_session,
     playlist,
     playlist_bookmark,
     playlist_video_member,

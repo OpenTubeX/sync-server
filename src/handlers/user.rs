@@ -254,37 +254,53 @@ fn forwarded_client(header: &str, trusted_proxy_hops: usize) -> Option<IpAddr> {
         })
 }
 
+pub(crate) fn request_within_rate_limit(req: &HttpRequest, limiter: &RateLimiter) -> bool {
+    let peer = req.peer_addr().map(|address| address.ip());
+    let client = if limiter.trusts_forwarded_for() {
+        req.headers()
+            .get("X-Forwarded-For")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|header| forwarded_client(header, limiter.trusted_proxy_hops()))
+            .or(peer)
+    } else {
+        peer
+    };
+    client.is_none_or(|address| limiter.check(address))
+}
+
+pub(crate) async fn authenticate_account(
+    req: &HttpRequest,
+    pool: &WebData,
+) -> HandlerResult<Account> {
+    let auth_header = req
+        .headers()
+        .get(AUTH_HEADER_KEY)
+        .and_then(|header| header.to_str().ok())
+        .map(str::to_owned);
+    let auth_cookie = req
+        .cookie(AUTH_HEADER_KEY)
+        .map(|cookie| cookie.value().to_owned());
+
+    let jwt = auth_cookie
+        .or(auth_header)
+        .ok_or(HandlerError::InvalidToken)?;
+    let account_id =
+        verify_jwt(&jwt, CONFIG.secret.as_bytes()).map_err(|_| HandlerError::InvalidToken)?;
+    let mut conn = get_db_conn!(pool);
+    find_account_by_id(&mut conn, &account_id)
+        .await
+        .map_err(|_| HandlerError::InternalDatabaseError)?
+        .ok_or(HandlerError::AccountNotExists)
+}
+
 /// Middleware that ensures that the account is authenticated.
 pub async fn auth_middleware(
     req: ServiceRequest,
     next: Next<impl MessageBody>,
 ) -> Result<ServiceResponse<impl MessageBody>, actix_web::Error> {
-    let auth_header = req
-        .headers()
-        .get(AUTH_HEADER_KEY)
-        .and_then(|header| header.to_str().ok())
-        .map(|value| value.to_string());
-    let auth_cookie = req
-        .cookie(AUTH_HEADER_KEY)
-        .map(|cookie| cookie.value().to_string());
-
-    let Some(jwt) = auth_cookie.or(auth_header) else {
-        return Err(HandlerError::InvalidToken.into());
-    };
-    let Ok(account_id) = verify_jwt(&jwt, CONFIG.secret.as_bytes()) else {
-        return Err(HandlerError::InvalidToken.into());
-    };
-
     let pool: WebData = req.app_data().cloned().unwrap();
+    let account = authenticate_account(req.request(), &pool).await?;
     let mut conn = get_db_conn!(pool);
-
-    let Some(account) = find_account_by_id(&mut conn, &account_id)
-        .await
-        .ok()
-        .flatten()
-    else {
-        return Err(HandlerError::AccountNotExists.into());
-    };
 
     // Scopes opt out explicitly. Matching on the request path instead would let
     // a route parameter such as `/playlists/encrypted_sync/videos` slip past.

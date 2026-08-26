@@ -27,6 +27,7 @@ pub struct SyncCapabilities {
     pub encrypted_sync: u8,
     pub bulk_sync: u8,
     pub history_page_size: u32,
+    pub key_pairing: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -59,6 +60,58 @@ pub struct EncryptedSyncCollectionResponse {
 pub struct PutEncryptedSync {
     pub revision: i64,
     pub payload: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreatePairingSession {
+    pub version: u8,
+    pub id: String,
+    pub recipient_public_key: String,
+    pub recipient_device_id: String,
+    pub recipient_device_name: String,
+    pub recipient_token_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ClaimPairingSession {
+    pub version: u8,
+    pub recipient_public_key: String,
+    pub recipient_device_id: String,
+    pub recipient_device_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovePairingSession {
+    pub approving_device_id: String,
+    pub encrypted_payload: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PairingSessionResponse {
+    pub version: u8,
+    pub id: String,
+    pub account_id: Option<String>,
+    pub recipient_public_key: String,
+    pub recipient_device_id: String,
+    pub recipient_device_name: String,
+    pub approving_device_id: Option<String>,
+    pub expires_at: i64,
+    pub approved: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PairingClaimResponse {
+    pub session: PairingSessionResponse,
+    pub jwt: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PairingPayloadResponse {
+    pub approving_device_id: String,
+    pub encrypted_payload: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
