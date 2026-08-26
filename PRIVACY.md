@@ -1,6 +1,6 @@
 # OpenTubeX Sync Server Privacy Policy
 
-Last updated: July 23, 2026
+Last updated: August 26, 2026
 
 This policy applies to the public OpenTubeX sync server at
 [sync.d3sox.me](https://sync.d3sox.me). Other operators running this
@@ -29,6 +29,20 @@ payload, collection name, revision, account ID, and padded payload size. It
 never receives the passphrase or plaintext. The operator can still observe
 account activity, request timing, collection names, and approximate data size.
 The server cannot recover a lost privacy passphrase.
+
+**Device pairing.** Secure device pairing temporarily stores a one-time session
+ID, SHA-256 recipient-token hash, recipient public key, pairing-scoped device
+identifiers, the receiving device's user-chosen display name, expiry time, and
+an encrypted pairing payload. It adds the account ID when an authenticated
+device claims the session. Sessions expire after two minutes and are deleted
+when they are consumed or cancelled. Poll, consume, and cancel requests send
+the raw recipient token in a request header; the server stores only its hash.
+The server never receives the QR-only pairing secret, recipient private key,
+privacy key, privacy passphrase, or login password. It creates a fresh
+authentication token for the receiving device during the claim and therefore
+knows that token. The approving device places the token inside the encrypted
+relay payload together with the account name and privacy key. The server cannot
+open or replace that payload without the QR-only secret.
 
 **Legacy compatibility.** The server retains plaintext endpoints for older or
 non-OpenTubeX clients. Current OpenTubeX clients do not use them on this public

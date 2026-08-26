@@ -24,7 +24,7 @@ use utoipa_scalar::{Scalar, Servable};
 use crate::{
     handlers::{
         ScopedHandler, channel_playback_speeds::ChannelPlaybackSpeedsHandler,
-        encrypted_sync::EncryptedSyncHandler, health::HealthHandler,
+        encrypted_sync::EncryptedSyncHandler, health::HealthHandler, pairing::PairingHandler,
         playlist_bookmarks::PlaylistBookmarksHandler, playlists::PlaylistsHandler,
         subscriptions::SubscriptionsHandler, user::UserHandler, watch_history::WatchHistoryHandler,
     },
@@ -116,7 +116,8 @@ async fn main() -> io::Result<()> {
                     .service(PlaylistsHandler::get_service())
                     .service(PlaylistBookmarksHandler::get_service())
                     .service(WatchHistoryHandler::get_service())
-                    .service(EncryptedSyncHandler::get_service()),
+                    .service(EncryptedSyncHandler::get_service())
+                    .service(PairingHandler::get_service()),
             )
             .split_for_parts();
 

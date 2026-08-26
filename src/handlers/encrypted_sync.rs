@@ -40,16 +40,14 @@ impl ScopedHandler for EncryptedSyncHandler {
             Error = actix_web::Error,
         >,
     > {
-        scope::scope("").service(
-            scope::scope("/encrypted_sync")
-                .app_data(web::JsonConfig::default().limit(MAX_ENCRYPTED_SYNC_BYTES + 1024))
-                .app_data(web::Data::new(PlaintextSyncExempt))
-                .wrap(actix_web::middleware::from_fn(auth_middleware))
-                .service(get_encrypted_sync_manifest)
-                .service(get_legacy_encrypted_sync)
-                .service(get_encrypted_sync_collection)
-                .service(put_encrypted_sync_collection),
-        )
+        scope::scope("/encrypted_sync")
+            .app_data(web::JsonConfig::default().limit(MAX_ENCRYPTED_SYNC_BYTES + 1024))
+            .app_data(web::Data::new(PlaintextSyncExempt))
+            .wrap(actix_web::middleware::from_fn(auth_middleware))
+            .service(get_encrypted_sync_manifest)
+            .service(get_legacy_encrypted_sync)
+            .service(get_encrypted_sync_collection)
+            .service(put_encrypted_sync_collection)
     }
 }
 
@@ -58,6 +56,7 @@ pub(crate) fn sync_capabilities() -> SyncCapabilities {
         encrypted_sync: 1,
         bulk_sync: 1,
         history_page_size: MAX_PAGE_SIZE,
+        key_pairing: 1,
     }
 }
 

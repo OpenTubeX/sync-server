@@ -97,6 +97,22 @@ pub struct EncryptedSync {
     pub payload: String,
 }
 
+#[derive(Debug, Clone, Queryable, Selectable, Insertable, Eq, PartialEq)]
+#[diesel(belongs_to(Account))]
+#[diesel(table_name = pairing_session)]
+pub struct PairingSession {
+    pub id: String,
+    pub version: i16,
+    pub account_id: Option<String>,
+    pub recipient_public_key: String,
+    pub recipient_device_id: String,
+    pub recipient_device_name: String,
+    pub recipient_token_hash: String,
+    pub approving_device_id: Option<String>,
+    pub encrypted_payload: Option<String>,
+    pub expires_at: i64,
+}
+
 #[derive(
     Debug,
     Clone,

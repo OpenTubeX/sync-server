@@ -2236,6 +2236,7 @@ dependencies = [
  "actix-rt",
  "actix-web",
  "argon2",
+ "base64 0.22.1",
  "config",
  "diesel",
  "diesel-async",

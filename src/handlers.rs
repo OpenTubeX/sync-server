@@ -14,6 +14,7 @@ use crate::{models::Account, oidc::OidcError};
 pub mod channel_playback_speeds;
 pub mod encrypted_sync;
 pub mod health;
+pub mod pairing;
 pub mod playlist_bookmarks;
 pub mod playlists;
 pub mod subscriptions;
@@ -72,6 +73,12 @@ pub enum HandlerError {
     EncryptedSyncQuotaExceeded,
     #[error("this account requires the encrypted sync endpoint")]
     EncryptedSyncRequired,
+    #[error("pairing session not found or expired")]
+    PairingNotFound,
+    #[error("pairing session has already changed state")]
+    PairingConflict,
+    #[error("too many active pairing sessions")]
+    PairingLimitExceeded,
     #[error("failed to load data from YouTube")]
     YouTubeConnectError,
     #[error("{0}")]
@@ -108,6 +115,9 @@ impl ResponseError for HandlerError {
             Self::StorageQuotaExceeded => StatusCode::PAYLOAD_TOO_LARGE,
             Self::EncryptedSyncQuotaExceeded => StatusCode::PAYLOAD_TOO_LARGE,
             Self::EncryptedSyncRequired => StatusCode::CONFLICT,
+            Self::PairingNotFound => StatusCode::NOT_FOUND,
+            Self::PairingConflict => StatusCode::CONFLICT,
+            Self::PairingLimitExceeded => StatusCode::TOO_MANY_REQUESTS,
             Self::YouTubeConnectError => StatusCode::INTERNAL_SERVER_ERROR,
             Self::OidcError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::PasswordLoginDisabledForAccount => StatusCode::BAD_REQUEST,

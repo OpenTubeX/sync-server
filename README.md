@@ -198,6 +198,44 @@ for profiles, playback speeds, and sessions, 16 MiB for subscriptions and playli
 bookmarks, and 64 MiB for playlists and history. The combined active encrypted
 collections for one account cannot exceed 128 MiB.
 
+### Secure device pairing
+
+Capability `key_pairing: 1` advertises passwordless device pairing for
+enhanced-privacy sync. A receiving device anonymously creates a pending
+session, then shows a QR or text code. An already authenticated device claims
+the session for its account and approves it. During the claim, the server mints
+a fresh JWT for the receiving device. The approving device encrypts that JWT,
+the account name, privacy key, privacy salt, and a six-digit verification code
+before uploading one opaque relay payload.
+
+The server stores the session ID, SHA-256 recipient-token hash, recipient public
+key, pairing-scoped device IDs, receiving-device display name, expiry, account
+ID after claim, and approved ciphertext. It never receives the QR-only secret,
+recipient private key, privacy key, or privacy passphrase. Poll, consume, and
+cancel requests send the raw recipient token in a request header; the server
+stores only its hash. The server created the fresh JWT and therefore knows that
+token, but it cannot open or replace the encrypted transfer without the QR-only
+secret.
+
+Sessions expire after two minutes. The server permits at most 10,000 active
+anonymous sessions globally and five claimed sessions per account. Authenticated
+pairing requests are limited to 120 per account per minute, while anonymous
+creation uses the server's address-based request limiter. Approval accepts an
+identical retry after success. Consumption atomically returns and deletes the
+ciphertext, and cancellation deletes the session.
+
+The endpoints are:
+
+- anonymous `POST /v1/pairing` to create a session with a recipient-token hash
+- recipient-token `GET /v1/pairing/{id}` to inspect its metadata and state
+- authenticated `POST /v1/pairing/{id}/claim` to bind it to an account and mint a fresh JWT
+- authenticated `PUT /v1/pairing/{id}` to approve it with an opaque ciphertext
+- recipient-token `POST /v1/pairing/{id}/consume` to atomically consume it
+- recipient-token `DELETE /v1/pairing/{id}` to cancel it
+
+The protocol, threat model, fixed serialization, and interoperability vector
+live in the OpenTubeX client repository at `docs/sync-key-pairing-v1.md`.
+
 ## Development
 
 ### Running
