@@ -9,12 +9,14 @@ use crate::models::{
 pub struct RegisterUser {
     pub name: String,
     pub password: String,
+    pub device_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct LoginUser {
     pub name: String,
     pub password: String,
+    pub device_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
@@ -28,6 +30,7 @@ pub struct SyncCapabilities {
     pub bulk_sync: u8,
     pub history_page_size: u32,
     pub key_pairing: u8,
+    pub account_sessions: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -80,6 +83,7 @@ pub struct ClaimPairingSession {
     pub recipient_public_key: String,
     pub recipient_device_id: String,
     pub recipient_device_name: String,
+    pub encrypted_device_info: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -117,6 +121,36 @@ pub struct PairingPayloadResponse {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct DeleteUser {
     pub password: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateAccountSession {
+    pub encrypted_device_info: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChangePassword {
+    pub current_password: String,
+    pub new_password: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AccountSessionResponse {
+    pub id: String,
+    pub device_id: String,
+    pub encrypted_device_info: Option<String>,
+    pub created_at: i64,
+    pub last_active_at: i64,
+    pub expires_at: i64,
+    pub current: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AccountSessionsResponse {
+    pub sessions: Vec<AccountSessionResponse>,
+    pub password_login: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
@@ -263,5 +297,8 @@ pub enum WatchedState {
 pub struct JwtClaims {
     /// User ID.
     pub sub: String,
+    /// Database-backed account session ID.
+    #[serde(default)]
+    pub jti: Option<String>,
     pub exp: usize,
 }

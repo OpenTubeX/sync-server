@@ -1,6 +1,22 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
+    account_session (id) {
+        id -> Text,
+        account_id -> Text,
+        device_id -> Text,
+        encrypted_device_info -> Nullable<Text>,
+        created_at -> BigInt,
+        last_active_at -> BigInt,
+        expires_at -> BigInt,
+        revoked_at -> Nullable<BigInt>,
+        legacy -> Bool,
+        generation -> BigInt,
+        pending_pairing -> Bool,
+    }
+}
+
+diesel::table! {
     encrypted_sync (account_id, collection) {
         account_id -> Text,
         collection -> Text,
@@ -30,6 +46,8 @@ diesel::table! {
         name_hash -> Text,
         password_hash -> Nullable<Text>,
         oidc_sub -> Nullable<Text>,
+        legacy_tokens_enabled -> Bool,
+        session_generation -> BigInt,
     }
 }
 
@@ -130,6 +148,7 @@ diesel::table! {
 }
 
 diesel::joinable!(playlist -> account (account_id));
+diesel::joinable!(account_session -> account (account_id));
 diesel::joinable!(channel_playback_speed -> account (account_id));
 diesel::joinable!(encrypted_sync -> account (account_id));
 diesel::joinable!(pairing_session -> account (account_id));
@@ -149,6 +168,7 @@ diesel::joinable!(watch_history -> video (video_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     account,
+    account_session,
     channel,
     channel_playback_speed,
     encrypted_sync,

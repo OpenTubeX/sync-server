@@ -1,6 +1,6 @@
 # OpenTubeX Sync Server Privacy Policy
 
-Last updated: August 26, 2026
+Last updated: September 1, 2026
 
 This policy applies to the public OpenTubeX sync server at
 [sync.d3sox.me](https://sync.d3sox.me). Other operators running this
@@ -18,9 +18,19 @@ does not control data processed by independently hosted instances.
 
 **Account data.** The server stores a unique account ID, a deterministic
 HMAC-derived value of your account name, and a salted Argon2 password hash. It
-does not store your account name or password in plaintext. It issues a signed
-authentication token after login but does not store that token in the
-database.
+does not store your account name or password in plaintext. Each current login
+has an account session with a random session ID and device ID, an encrypted device
+information record, creation and last-active times, an expiry time, and an
+internal session-generation number. Pairing sessions additionally retain a
+provisional-state flag until pairing succeeds. The
+encrypted record contains the device name, operating system, system release,
+and architecture. Your device encrypts it with your privacy key, so the server
+cannot read those details. The server signs an authentication token that names
+the stored session but does not store the full token in the database. Last-active
+times are updated at most once every five minutes. For a still-valid token made
+before account sessions were introduced, the server derives stable session and
+device IDs from a SHA-256 digest of that token when it is first used. It does not
+store the token itself.
 
 **Encrypted sync.** The public server supports encrypted sync, and OpenTubeX
 always uses it when the server supports it. Sync data is encrypted on your
@@ -31,11 +41,13 @@ account activity, request timing, collection names, and approximate data size.
 The server cannot recover a lost privacy passphrase.
 
 **Device pairing.** Secure device pairing temporarily stores a one-time session
-ID, SHA-256 recipient-token hash, recipient public key, pairing-scoped device
-identifiers, the receiving device's user-chosen display name, expiry time, and
+ID, SHA-256 recipient-token hash, recipient public key, device identifiers, the
+receiving device's user-chosen display name, expiry time, and
 an encrypted pairing payload. It adds the account ID when an authenticated
-device claims the session. Sessions expire after two minutes and are deleted
-when they are consumed or cancelled. Poll, consume, and cancel requests send
+device claims the session. Claiming creates a provisional account session; it
+becomes active only when the pairing payload is consumed and is removed if the
+pairing expires or is cancelled. Pairing sessions expire after two minutes and
+are deleted when they are consumed or cancelled. Poll, consume, and cancel requests send
 the raw recipient token in a request header; the server stores only its hash.
 The server never receives the QR-only pairing secret, recipient private key,
 privacy key, privacy passphrase, or login password. It creates a fresh
@@ -99,6 +111,14 @@ request.
 Account and sync data remain in the active database until you delete individual
 items or your account. Account deletion removes the account and its linked data
 from the active database. Shared public YouTube metadata may remain.
+
+Account sessions remain until their one-year authentication token expires.
+Revocation prevents authentication immediately but retains the session as a
+tombstone until expiry so a legacy token cannot recreate it. A background task
+deletes expired records, normally within one hour. Changing an account password
+rotates the requesting device's token, advances the account's session generation,
+and revokes every previous session, including concurrent logins and legacy tokens
+that the server has not seen yet.
 
 - Request logs are retained for up to seven days.
 - A database backup is created daily, with the seven most recent backups

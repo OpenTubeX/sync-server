@@ -1,4 +1,5 @@
 pub mod account;
+pub mod account_session;
 pub mod channel;
 pub mod channel_playback_speed;
 pub mod encrypted_sync;

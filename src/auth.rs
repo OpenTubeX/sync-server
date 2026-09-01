@@ -20,26 +20,30 @@ pub fn bytes_to_hex_string(bytes: &[u8]) -> String {
 }
 
 /// How long a freshly minted token stays valid. Should be enough in most cases.
-const TOKEN_TTL: Duration = Duration::from_hours(365 * 24);
+pub const TOKEN_TTL: Duration = Duration::from_hours(365 * 24);
 
 /// Allowance for clock skew between minting and verifying.
 const EXPIRY_LEEWAY: Duration = Duration::from_secs(5 * 60);
 
-fn unix_now() -> u64 {
+pub fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
 }
 
-pub fn generate_jwt(account: &Account, secret_key: &[u8]) -> jsonwebtoken::errors::Result<String> {
+pub fn generate_jwt(
+    account: &Account,
+    session_id: &str,
+    expires_at: u64,
+    secret_key: &[u8],
+) -> jsonwebtoken::errors::Result<String> {
     let key = EncodingKey::from_secret(secret_key);
-    // `exp` is defined in seconds since the epoch, not milliseconds.
-    let expiration_date = unix_now().saturating_add(TOKEN_TTL.as_secs());
 
     let claims = JwtClaims {
         sub: account.id.clone(),
-        exp: expiration_date as usize,
+        jti: Some(session_id.to_owned()),
+        exp: expires_at as usize,
     };
     encode(&Header::default(), &claims, &key)
 }
@@ -56,8 +60,7 @@ fn expiry_is_plausible(exp: u64, now: u64) -> bool {
         .saturating_add(EXPIRY_LEEWAY.as_secs())
 }
 
-/// Returns the User ID on success.
-pub fn verify_jwt(encoded_jwt: &str, secret_key: &[u8]) -> jsonwebtoken::errors::Result<String> {
+pub fn verify_jwt(encoded_jwt: &str, secret_key: &[u8]) -> jsonwebtoken::errors::Result<JwtClaims> {
     let key = DecodingKey::from_secret(secret_key);
     let claims: JwtClaims = decode(encoded_jwt.as_bytes(), &key, &Validation::default())?.claims;
 
@@ -65,7 +68,7 @@ pub fn verify_jwt(encoded_jwt: &str, secret_key: &[u8]) -> jsonwebtoken::errors:
         return Err(jsonwebtoken::errors::ErrorKind::InvalidToken.into());
     }
 
-    Ok(claims.sub)
+    Ok(claims)
 }
 
 fn argon2_instance<'a>() -> Argon2<'a> {
@@ -101,9 +104,19 @@ pub fn hash_accountname(accountname: &str, secret_key: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{EXPIRY_LEEWAY, TOKEN_TTL, expiry_is_plausible};
+    use jsonwebtoken::{EncodingKey, Header, encode};
+    use serde::Serialize;
+
+    use super::{EXPIRY_LEEWAY, TOKEN_TTL, expiry_is_plausible, generate_jwt, verify_jwt};
+    use crate::models::Account;
 
     const NOW: u64 = 1_800_000_000;
+
+    #[derive(Serialize)]
+    struct LegacyClaims<'a> {
+        sub: &'a str,
+        exp: usize,
+    }
 
     #[test]
     fn normal_expiries_are_accepted() {
@@ -131,5 +144,44 @@ mod tests {
             NOW
         ));
         assert!(!expiry_is_plausible(u64::MAX, NOW));
+    }
+
+    #[test]
+    fn tokens_are_bound_to_their_account_session() {
+        let account = Account {
+            id: "account-id".to_owned(),
+            name_hash: "name-hash".to_owned(),
+            password_hash: Some("password-hash".to_owned()),
+            oidc_sub: None,
+            legacy_tokens_enabled: false,
+            session_generation: 0,
+        };
+        let secret = b"a secret key long enough for this unit test";
+        let expires_at = super::unix_now() + 60;
+        let jwt = generate_jwt(&account, "session-id", expires_at, secret).unwrap();
+        let claims = verify_jwt(&jwt, secret).unwrap();
+
+        assert_eq!(claims.sub, account.id);
+        assert_eq!(claims.jti.as_deref(), Some("session-id"));
+        assert_eq!(claims.exp, expires_at as usize);
+    }
+
+    #[test]
+    fn tokens_minted_before_session_management_still_verify() {
+        let secret = b"a secret key long enough for this unit test";
+        let expires_at = super::unix_now() + 60;
+        let jwt = encode(
+            &Header::default(),
+            &LegacyClaims {
+                sub: "account-id",
+                exp: expires_at as usize,
+            },
+            &EncodingKey::from_secret(secret),
+        )
+        .unwrap();
+        let claims = verify_jwt(&jwt, secret).unwrap();
+
+        assert_eq!(claims.sub, "account-id");
+        assert_eq!(claims.jti, None);
     }
 }

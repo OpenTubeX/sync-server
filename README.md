@@ -181,6 +181,48 @@ For example:
 - Header: `Authorization: abcdefghijklmnopqrtuvwxyz`
 - Cookie: `Authorization=abcdefghijklmnopqrtuvwxyz`
 
+### Account sessions
+
+Capability `account_sessions: 1` means authentication tokens are backed by
+stored account sessions. Registration, password login, and OIDC login create an
+active session. Secure pairing creates a provisional session that becomes active
+only when the receiving device consumes the approved pairing payload. A token
+contains that session's ID in its `jti`
+claim, and authenticated requests fail after the session is revoked or expires.
+Tokens issued before this capability was added do not contain `jti`. For
+accounts present during the migration, the server accepts a still-valid legacy
+token and creates its session on first use. New accounts require session-bound
+tokens. The server
+derives stable session and device IDs from a SHA-256 digest of the token and
+does not store the token itself. Revoking that session leaves a tombstone until
+the token expires, so the same token cannot recreate the session.
+
+Current clients send a random 16-byte base64url device ID when they authenticate.
+The field is optional so older clients can continue to register and sign in; the
+server assigns their device ID. Clients
+encrypt the user-visible device name, operating system, system release, and
+architecture with the enhanced-privacy key, then update the session with the
+ciphertext. Clients can replace that ciphertext to rename any active device.
+The server retains creation, last-active, and expiry times. It writes
+last-active changes at most once every five minutes.
+
+The endpoints are:
+
+- authenticated `GET /v1/account/sessions` to list active sessions and whether the account supports password login
+- authenticated `PATCH /v1/account/sessions/{id}` to store encrypted device information; `current` may be used as the ID for the requesting session
+- authenticated `DELETE /v1/account/sessions/{id}` to revoke one session
+- authenticated `PUT /v1/account/password` to change a password, revoke every existing session, and return a replacement JWT for the requesting device
+
+Expired and revoked sessions never authenticate. A background task removes them
+after expiry, normally within one hour. Password changes verify the current
+password and update its Argon2 hash in the same transaction that rotates the
+requesting session, advances the account's session generation, and revokes the
+rest. The generation check also rejects a concurrent login that verified the old
+password but had not created its session yet. Password changes reject every legacy token
+that has not yet created a session. This lets operators deploy the feature
+without signing out old clients, while password changes still invalidate all
+other access.
+
 ### Enhanced privacy sync
 
 `GET /health` returns the server's capabilities alongside its health status.
@@ -203,13 +245,14 @@ collections for one account cannot exceed 128 MiB.
 Capability `key_pairing: 1` advertises passwordless device pairing for
 enhanced-privacy sync. A receiving device anonymously creates a pending
 session, then shows a QR or text code. An already authenticated device claims
-the session for its account and approves it. During the claim, the server mints
-a fresh JWT for the receiving device. The approving device encrypts that JWT,
+the session for its account and approves it. During the claim, the server creates
+a provisional account session and mints a JWT for the receiving device. The approving
+device encrypts that JWT,
 the account name, privacy key, privacy salt, and a six-digit verification code
 before uploading one opaque relay payload.
 
 The server stores the session ID, SHA-256 recipient-token hash, recipient public
-key, pairing-scoped device IDs, receiving-device display name, expiry, account
+key, device IDs, receiving-device display name, expiry, account
 ID after claim, and approved ciphertext. It never receives the QR-only secret,
 recipient private key, privacy key, or privacy passphrase. Poll, consume, and
 cancel requests send the raw recipient token in a request header; the server
@@ -223,13 +266,14 @@ sessions globally and five claimed sessions per account. Authenticated pairing
 requests are limited to 120 per account per minute, while anonymous creation
 uses the server's address-based request limiter. Claim and approval accept an
 identical retry after success. Consumption atomically returns and deletes the
-ciphertext, and cancellation deletes the session.
+ciphertext, activates the provisional account session, and cancellation or
+expiry deletes it.
 
 The endpoints are:
 
 - anonymous `POST /v1/pairing` to create a session with a recipient-token hash
 - recipient-token `GET /v1/pairing/{id}` to inspect its metadata and state
-- authenticated `POST /v1/pairing/{id}/claim` to bind it to an account and mint a fresh JWT
+- authenticated `POST /v1/pairing/{id}/claim` to bind it to an account, create its provisional session, and mint a JWT
 - authenticated `PUT /v1/pairing/{id}` to approve it with an opaque ciphertext
 - recipient-token `POST /v1/pairing/{id}/consume` to atomically consume it
 - recipient-token `DELETE /v1/pairing/{id}` to cancel it
