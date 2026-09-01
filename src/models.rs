@@ -27,6 +27,39 @@ pub struct Account {
     pub password_hash: Option<String>,
     #[serde(skip_serializing)]
     pub oidc_sub: Option<String>,
+    #[serde(skip_serializing)]
+    pub legacy_tokens_enabled: bool,
+    #[serde(skip_serializing)]
+    pub session_generation: i64,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    Queryable,
+    Selectable,
+    Insertable,
+    AsChangeset,
+    ToSchema,
+    Eq,
+    PartialEq,
+)]
+#[diesel(belongs_to(Account))]
+#[diesel(table_name = account_session)]
+pub struct AccountSession {
+    pub id: String,
+    pub account_id: String,
+    pub device_id: String,
+    pub encrypted_device_info: Option<String>,
+    pub created_at: i64,
+    pub last_active_at: i64,
+    pub expires_at: i64,
+    pub revoked_at: Option<i64>,
+    pub legacy: bool,
+    pub generation: i64,
+    pub pending_pairing: bool,
 }
 
 #[derive(

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use actix_web::body::MessageBody;
 use actix_web::dev::{ServiceFactory, ServiceRequest, ServiceResponse};
@@ -10,33 +10,32 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sha2::{Digest, Sha256};
 use utoipa_actix_web::scope;
 
-use crate::auth::generate_jwt;
 use crate::database::pairing;
 use crate::dto::{
     ApprovePairingSession, ClaimPairingSession, CreatePairingSession, PairingClaimResponse,
     PairingPayloadResponse, PairingSessionResponse,
 };
-use crate::handlers::user::{authenticate_account, request_within_rate_limit};
+use crate::handlers::session::{is_base64url, now_ms, validate_device_id, validate_device_name};
+use crate::handlers::user::{
+    authenticate_account, new_pairing_account_session, request_within_rate_limit, session_token,
+    validate_encrypted_device_info,
+};
 use crate::handlers::{HandlerError, HandlerResult, ScopedHandler};
 use crate::models::{Account, PairingSession};
 use crate::rate_limit::RateLimiter;
-use crate::{CONFIG, WebData, get_db_conn};
+use crate::{WebData, get_db_conn};
 
 const PAIRING_TTL_MS: i64 = 2 * 60 * 1000;
 const PAIRING_PROTOCOL_VERSION: u8 = 1;
 const SESSION_ID_BYTES: usize = 32;
 const PUBLIC_KEY_BYTES: usize = 32;
-const DEVICE_ID_BYTES: usize = 16;
 const RECIPIENT_TOKEN_BYTES: usize = 32;
 const RECIPIENT_TOKEN_HEADER: &str = "X-Pairing-Token";
-const MAX_DEVICE_NAME_CHARS: usize = 80;
-const MAX_DEVICE_NAME_BYTES: usize = 240;
 const MIN_ENCRYPTED_PAYLOAD_BYTES: usize = 96;
 const MAX_ENCRYPTED_PAYLOAD_BYTES: usize = 1536;
 const MAX_ENCRYPTED_PAYLOAD_LENGTH: usize = 2048;
 const MAX_PAIRING_REQUESTS_PER_MINUTE: u32 = 120;
 const MAX_TRACKED_ACCOUNTS: usize = 100_000;
-const PAIRING_CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
 
 struct PairingRateWindow {
     started_at: Instant,
@@ -78,26 +77,6 @@ static PAIRING_RATE_LIMITER: LazyLock<PairingRateLimiter> = LazyLock::new(|| Pai
     windows: Mutex::new(HashMap::new()),
 });
 
-pub fn start_expired_session_cleanup(pool: crate::DbPool) {
-    actix_web::rt::spawn(async move {
-        let mut interval = actix_web::rt::time::interval(PAIRING_CLEANUP_INTERVAL);
-        loop {
-            interval.tick().await;
-            let Ok(now) = now_ms() else {
-                log::error!("could not determine the time for pairing-session cleanup");
-                continue;
-            };
-            let Ok(mut conn) = pool.get().await else {
-                log::error!("could not get a database connection for pairing-session cleanup");
-                continue;
-            };
-            if let Err(error) = pairing::delete_expired(&mut conn, now).await {
-                log::error!("could not delete expired pairing sessions: {error}");
-            }
-        }
-    });
-}
-
 pub struct PairingHandler {}
 
 impl ScopedHandler for PairingHandler {
@@ -121,14 +100,6 @@ impl ScopedHandler for PairingHandler {
     }
 }
 
-fn now_ms() -> HandlerResult<i64> {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| HandlerError::InternalDatabaseError)?
-        .as_millis();
-    i64::try_from(millis).map_err(|_| HandlerError::InternalDatabaseError)
-}
-
 fn check_account_rate_limit(account: &Account) -> HandlerResult<()> {
     if !PAIRING_RATE_LIMITER.check(&account.id) {
         return Err(HandlerError::TooManyRequests);
@@ -136,39 +107,10 @@ fn check_account_rate_limit(account: &Account) -> HandlerResult<()> {
     Ok(())
 }
 
-fn is_base64url(value: &str, expected_length: usize) -> bool {
-    URL_SAFE_NO_PAD
-        .decode(value)
-        .is_ok_and(|bytes| bytes.len() == expected_length && URL_SAFE_NO_PAD.encode(bytes) == value)
-}
-
 fn validate_session_id(value: &str) -> HandlerResult<()> {
     if !is_base64url(value, SESSION_ID_BYTES) {
         return Err(HandlerError::ValidationErrorWithContext(
             "invalid pairing session id".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_device_id(value: &str) -> HandlerResult<()> {
-    if !is_base64url(value, DEVICE_ID_BYTES) {
-        return Err(HandlerError::ValidationErrorWithContext(
-            "invalid pairing device id".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_device_name(value: &str) -> HandlerResult<()> {
-    if value.is_empty()
-        || value.trim() != value
-        || value.chars().count() > MAX_DEVICE_NAME_CHARS
-        || value.len() > MAX_DEVICE_NAME_BYTES
-        || value.chars().any(char::is_control)
-    {
-        return Err(HandlerError::ValidationErrorWithContext(
-            "invalid pairing device name".to_owned(),
         ));
     }
     Ok(())
@@ -216,7 +158,11 @@ fn validate_claim(form: &ClaimPairingSession) -> HandlerResult<()> {
         &form.recipient_public_key,
         &form.recipient_device_id,
         &form.recipient_device_name,
-    )
+    )?;
+    if let Some(encrypted_device_info) = &form.encrypted_device_info {
+        validate_encrypted_device_info(encrypted_device_info)?;
+    }
+    Ok(())
 }
 
 fn validate_approval(form: &ApprovePairingSession) -> HandlerResult<()> {
@@ -330,8 +276,6 @@ async fn claim_pairing_session(
     check_account_rate_limit(&account)?;
     validate_session_id(&id)?;
     validate_claim(&form)?;
-    let jwt = generate_jwt(&account, CONFIG.secret.as_bytes())
-        .map_err(|_| HandlerError::InternalDatabaseError)?;
     let candidate = PairingSession {
         id: id.into_inner(),
         version: i16::from(form.version),
@@ -345,14 +289,30 @@ async fn claim_pairing_session(
         expires_at: 0,
     };
     let mut conn = get_db_conn!(pool);
-    let session = match pairing::claim(&mut conn, &account.id, &candidate, now_ms()?)
-        .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?
+    let account_session = new_pairing_account_session(
+        &account,
+        candidate.id.clone(),
+        candidate.recipient_device_id.clone(),
+        form.encrypted_device_info.clone(),
+    )?;
+    let (session, account_session) = match pairing::claim(
+        &mut conn,
+        &account.id,
+        &candidate,
+        &account_session,
+        now_ms()?,
+    )
+    .await
+    .map_err(|_| HandlerError::InternalDatabaseError)?
     {
-        pairing::ClaimResult::Claimed(session) => session,
+        pairing::ClaimResult::Claimed {
+            pairing,
+            account_session,
+        } => (pairing, account_session),
         pairing::ClaimResult::Conflict => return Err(HandlerError::PairingConflict),
         pairing::ClaimResult::LimitExceeded => return Err(HandlerError::PairingLimitExceeded),
     };
+    let jwt = session_token(&account, &account_session)?;
     Ok(web::Json(PairingClaimResponse {
         session: response(*session),
         jwt,
@@ -468,6 +428,7 @@ mod tests {
             recipient_public_key: create.recipient_public_key.clone(),
             recipient_device_id: create.recipient_device_id.clone(),
             recipient_device_name: create.recipient_device_name.clone(),
+            encrypted_device_info: Some("encrypted-device-info".to_owned()),
         };
         assert!(validate_claim(&claim).is_ok());
 

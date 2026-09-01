@@ -3,7 +3,7 @@ use diesel_async::{AsyncConnection, RunQueryDsl};
 
 use crate::DbConnection;
 use crate::database::DbError;
-use crate::models::PairingSession;
+use crate::models::{AccountSession, PairingSession};
 use crate::schema::pairing_session::dsl::{
     account_id, approving_device_id, encrypted_payload, expires_at, id, pairing_session,
     recipient_device_id, recipient_device_name, recipient_public_key, recipient_token_hash,
@@ -22,15 +22,38 @@ pub enum CreateResult {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ClaimResult {
-    Claimed(Box<PairingSession>),
+    Claimed {
+        pairing: Box<PairingSession>,
+        account_session: Box<AccountSession>,
+    },
     Conflict,
     LimitExceeded,
 }
 
 pub async fn delete_expired(conn: &mut DbConnection, now: i64) -> Result<usize, DbError> {
-    diesel::delete(pairing_session.filter(expires_at.le(now)))
-        .execute(conn)
-        .await
+    conn.transaction(|conn| {
+        Box::pin(async move {
+            let expired_ids = pairing_session
+                .filter(expires_at.le(now))
+                .select(id)
+                .load::<String>(conn)
+                .await?;
+            if expired_ids.is_empty() {
+                return Ok(0);
+            }
+            diesel::delete(
+                crate::schema::account_session::table
+                    .filter(crate::schema::account_session::id.eq_any(&expired_ids))
+                    .filter(crate::schema::account_session::pending_pairing.eq(true)),
+            )
+            .execute(conn)
+            .await?;
+            diesel::delete(pairing_session.filter(id.eq_any(expired_ids)))
+                .execute(conn)
+                .await
+        })
+    })
+    .await
 }
 
 pub async fn create(
@@ -68,6 +91,7 @@ pub async fn claim(
     conn: &mut DbConnection,
     owner_id: &str,
     request: &PairingSession,
+    candidate_session: &AccountSession,
     now: i64,
 ) -> Result<ClaimResult, DbError> {
     conn.transaction(|conn| {
@@ -75,10 +99,17 @@ pub async fn claim(
             use crate::schema::account;
 
             // Serialize the per-account limit across workers and replicas.
-            diesel::update(account::table.filter(account::id.eq(owner_id)))
-                .set(account::id.eq(account::id))
-                .execute(conn)
-                .await?;
+            let account_locked = diesel::update(
+                account::table
+                    .filter(account::id.eq(owner_id))
+                    .filter(account::session_generation.eq(candidate_session.generation)),
+            )
+            .set(account::id.eq(account::id))
+            .execute(conn)
+            .await?;
+            if account_locked != 1 {
+                return Ok(ClaimResult::Conflict);
+            }
             delete_expired(conn, now).await?;
 
             let existing = pairing_session
@@ -95,7 +126,13 @@ pub async fn claim(
                 .await
                 .optional()?;
             if let Some(session) = existing {
-                return Ok(ClaimResult::Claimed(Box::new(session)));
+                let account_session =
+                    crate::database::account_session::get_or_create(conn, candidate_session)
+                        .await?;
+                return Ok(ClaimResult::Claimed {
+                    pairing: Box::new(session),
+                    account_session: Box::new(account_session),
+                });
             }
 
             let active = pairing_session
@@ -124,9 +161,14 @@ pub async fn claim(
             .await
             .optional()?;
 
-            Ok(match claimed {
-                Some(session) => ClaimResult::Claimed(Box::new(session)),
-                None => ClaimResult::Conflict,
+            let Some(pairing) = claimed else {
+                return Ok(ClaimResult::Conflict);
+            };
+            let account_session =
+                crate::database::account_session::get_or_create(conn, candidate_session).await?;
+            Ok(ClaimResult::Claimed {
+                pairing: Box::new(pairing),
+                account_session: Box::new(account_session),
             })
         })
     })
@@ -196,18 +238,38 @@ pub async fn consume(
     token_hash: &str,
     now: i64,
 ) -> Result<Option<PairingSession>, DbError> {
-    diesel::delete(
-        pairing_session
-            .filter(id.eq(session_id))
-            .filter(version.eq(1))
-            .filter(recipient_token_hash.eq(token_hash))
-            .filter(expires_at.gt(now))
-            .filter(encrypted_payload.is_not_null()),
-    )
-    .returning(PairingSession::as_returning())
-    .get_result(conn)
+    conn.transaction(|conn| {
+        Box::pin(async move {
+            let consumed = diesel::delete(
+                pairing_session
+                    .filter(id.eq(session_id))
+                    .filter(version.eq(1))
+                    .filter(recipient_token_hash.eq(token_hash))
+                    .filter(expires_at.gt(now))
+                    .filter(encrypted_payload.is_not_null()),
+            )
+            .returning(PairingSession::as_returning())
+            .get_result(conn)
+            .await
+            .optional()?;
+            let Some(session) = consumed else {
+                return Ok(None);
+            };
+            let activated = diesel::update(
+                crate::schema::account_session::table
+                    .filter(crate::schema::account_session::id.eq(session_id))
+                    .filter(crate::schema::account_session::pending_pairing.eq(true)),
+            )
+            .set(crate::schema::account_session::pending_pairing.eq(false))
+            .execute(conn)
+            .await?;
+            if activated != 1 {
+                return Err(diesel::result::Error::NotFound);
+            }
+            Ok(Some(session))
+        })
+    })
     .await
-    .optional()
 }
 
 pub async fn cancel(
@@ -215,15 +277,30 @@ pub async fn cancel(
     session_id: &str,
     token_hash: &str,
 ) -> Result<bool, DbError> {
-    let deleted = diesel::delete(
-        pairing_session
-            .filter(id.eq(session_id))
-            .filter(version.eq(1))
-            .filter(recipient_token_hash.eq(token_hash)),
-    )
-    .execute(conn)
-    .await?;
-    Ok(deleted == 1)
+    conn.transaction(|conn| {
+        Box::pin(async move {
+            let deleted = diesel::delete(
+                pairing_session
+                    .filter(id.eq(session_id))
+                    .filter(version.eq(1))
+                    .filter(recipient_token_hash.eq(token_hash)),
+            )
+            .execute(conn)
+            .await?;
+            if deleted != 1 {
+                return Ok(false);
+            }
+            diesel::delete(
+                crate::schema::account_session::table
+                    .filter(crate::schema::account_session::id.eq(session_id))
+                    .filter(crate::schema::account_session::pending_pairing.eq(true)),
+            )
+            .execute(conn)
+            .await?;
+            Ok(true)
+        })
+    })
+    .await
 }
 
 #[cfg(all(test, feature = "sqlite"))]
@@ -235,7 +312,7 @@ mod tests {
     use super::{
         ClaimResult, CreateResult, approve, cancel, claim, consume, create, delete_expired, get,
     };
-    use crate::models::PairingSession;
+    use crate::models::{AccountSession, PairingSession};
     use crate::{DbConnection, MIGRATIONS};
 
     async fn connection() -> DbConnection {
@@ -271,6 +348,22 @@ mod tests {
         }
     }
 
+    fn account_session(request: &PairingSession, owner_id: &str) -> AccountSession {
+        AccountSession {
+            id: request.id.clone(),
+            account_id: owner_id.to_owned(),
+            device_id: request.recipient_device_id.clone(),
+            encrypted_device_info: Some("ciphertext".to_owned()),
+            created_at: 100,
+            last_active_at: 100,
+            expires_at: 1_000_000,
+            revoked_at: None,
+            legacy: false,
+            generation: 0,
+            pending_pairing: true,
+        }
+    }
+
     #[actix_rt::test]
     async fn sessions_require_the_recipient_token_and_are_single_use() {
         let mut conn = connection().await;
@@ -297,12 +390,34 @@ mod tests {
         );
 
         assert!(matches!(
-            claim(&mut conn, "account-a", &request, 100).await.unwrap(),
-            ClaimResult::Claimed(_)
+            claim(
+                &mut conn,
+                "account-a",
+                &request,
+                &account_session(&request, "account-a"),
+                100,
+            )
+            .await
+            .unwrap(),
+            ClaimResult::Claimed { .. }
         ));
         assert_eq!(
-            claim(&mut conn, "account-b", &request, 100).await.unwrap(),
+            claim(
+                &mut conn,
+                "account-b",
+                &request,
+                &account_session(&request, "account-b"),
+                100,
+            )
+            .await
+            .unwrap(),
             ClaimResult::Conflict
+        );
+        assert!(
+            crate::database::account_session::list_active(&mut conn, "account-a", 0, 100)
+                .await
+                .unwrap()
+                .is_empty()
         );
         assert!(
             !approve(&mut conn, "account-b", "session", "device", "payload", 100)
@@ -343,6 +458,13 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(payload.encrypted_payload.as_deref(), Some("payload"));
+        assert_eq!(
+            crate::database::account_session::list_active(&mut conn, "account-a", 0, 100)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
         assert!(
             consume(&mut conn, "session", "token-session", 100)
                 .await
@@ -362,7 +484,15 @@ mod tests {
         let mut changed = request.clone();
         changed.recipient_device_name = "Changed".to_owned();
         assert_eq!(
-            claim(&mut conn, "account-a", &changed, 100).await.unwrap(),
+            claim(
+                &mut conn,
+                "account-a",
+                &changed,
+                &account_session(&changed, "account-a"),
+                100,
+            )
+            .await
+            .unwrap(),
             ClaimResult::Conflict
         );
         assert!(
@@ -373,7 +503,15 @@ mod tests {
         );
         assert_eq!(delete_expired(&mut conn, 200).await.unwrap(), 1);
         assert_eq!(
-            claim(&mut conn, "account-a", &request, 200).await.unwrap(),
+            claim(
+                &mut conn,
+                "account-a",
+                &request,
+                &account_session(&request, "account-a"),
+                200,
+            )
+            .await
+            .unwrap(),
             ClaimResult::Conflict
         );
         assert!(!cancel(&mut conn, "session", "token-session").await.unwrap());
@@ -389,15 +527,31 @@ mod tests {
                 CreateResult::Created
             );
             assert!(matches!(
-                claim(&mut conn, "account-a", &request, 100).await.unwrap(),
-                ClaimResult::Claimed(_)
+                claim(
+                    &mut conn,
+                    "account-a",
+                    &request,
+                    &account_session(&request, "account-a"),
+                    100,
+                )
+                .await
+                .unwrap(),
+                ClaimResult::Claimed { .. }
             ));
         }
 
         let retry = session("session-0", 1_000);
         assert!(matches!(
-            claim(&mut conn, "account-a", &retry, 100).await.unwrap(),
-            ClaimResult::Claimed(_)
+            claim(
+                &mut conn,
+                "account-a",
+                &retry,
+                &account_session(&retry, "account-a"),
+                100,
+            )
+            .await
+            .unwrap(),
+            ClaimResult::Claimed { .. }
         ));
 
         let excess = session("session-5", 1_000);
@@ -406,12 +560,28 @@ mod tests {
             CreateResult::Created
         );
         assert_eq!(
-            claim(&mut conn, "account-a", &excess, 100).await.unwrap(),
+            claim(
+                &mut conn,
+                "account-a",
+                &excess,
+                &account_session(&excess, "account-a"),
+                100,
+            )
+            .await
+            .unwrap(),
             ClaimResult::LimitExceeded
         );
         assert!(matches!(
-            claim(&mut conn, "account-b", &excess, 100).await.unwrap(),
-            ClaimResult::Claimed(_)
+            claim(
+                &mut conn,
+                "account-b",
+                &excess,
+                &account_session(&excess, "account-b"),
+                100,
+            )
+            .await
+            .unwrap(),
+            ClaimResult::Claimed { .. }
         ));
     }
 
@@ -420,7 +590,36 @@ mod tests {
         let mut conn = connection().await;
         let request = session("session", 1_000);
         create(&mut conn, &request, 100).await.unwrap();
+        let provisional = account_session(&request, "account-a");
+        assert!(matches!(
+            claim(&mut conn, "account-a", &request, &provisional, 100)
+                .await
+                .unwrap(),
+            ClaimResult::Claimed { .. }
+        ));
         assert!(!cancel(&mut conn, "session", "wrong-token").await.unwrap());
         assert!(cancel(&mut conn, "session", "token-session").await.unwrap());
+        crate::database::account_session::create(&mut conn, &provisional)
+            .await
+            .expect("cancelling must remove the provisional account session");
+    }
+
+    #[actix_rt::test]
+    async fn expiration_removes_the_provisional_account_session() {
+        let mut conn = connection().await;
+        let request = session("session", 200);
+        create(&mut conn, &request, 100).await.unwrap();
+        let provisional = account_session(&request, "account-a");
+        assert!(matches!(
+            claim(&mut conn, "account-a", &request, &provisional, 100)
+                .await
+                .unwrap(),
+            ClaimResult::Claimed { .. }
+        ));
+
+        assert_eq!(delete_expired(&mut conn, 200).await.unwrap(), 1);
+        crate::database::account_session::create(&mut conn, &provisional)
+            .await
+            .expect("expiration must remove the provisional account session");
     }
 }

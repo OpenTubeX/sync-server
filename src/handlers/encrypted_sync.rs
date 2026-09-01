@@ -57,6 +57,7 @@ pub(crate) fn sync_capabilities() -> SyncCapabilities {
         bulk_sync: 1,
         history_page_size: MAX_PAGE_SIZE,
         key_pairing: 1,
+        account_sessions: 1,
     }
 }
 

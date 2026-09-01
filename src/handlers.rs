@@ -17,6 +17,7 @@ pub mod health;
 pub mod pairing;
 pub mod playlist_bookmarks;
 pub mod playlists;
+pub mod session;
 pub mod subscriptions;
 pub mod user;
 pub mod watch_history;
@@ -75,6 +76,8 @@ pub enum HandlerError {
     EncryptedSyncRequired,
     #[error("pairing session not found or expired")]
     PairingNotFound,
+    #[error("account session not found or expired")]
+    AccountSessionNotFound,
     #[error("pairing session has already changed state")]
     PairingConflict,
     #[error("too many active pairing sessions")]
@@ -116,6 +119,7 @@ impl ResponseError for HandlerError {
             Self::EncryptedSyncQuotaExceeded => StatusCode::PAYLOAD_TOO_LARGE,
             Self::EncryptedSyncRequired => StatusCode::CONFLICT,
             Self::PairingNotFound => StatusCode::NOT_FOUND,
+            Self::AccountSessionNotFound => StatusCode::NOT_FOUND,
             Self::PairingConflict => StatusCode::CONFLICT,
             Self::PairingLimitExceeded => StatusCode::TOO_MANY_REQUESTS,
             Self::YouTubeConnectError => StatusCode::INTERNAL_SERVER_ERROR,
@@ -195,6 +199,22 @@ impl FromRequest for Account {
         Box::pin(
             async move { account.ok_or(actix_web::error::ErrorForbidden("missing account info")) },
         )
+    }
+}
+
+impl FromRequest for crate::models::AccountSession {
+    type Error = actix_web::Error;
+
+    type Future = Pin<Box<dyn Future<Output = Result<Self, Self::Error>>>>;
+
+    fn from_request(req: &HttpRequest, _payload: &mut actix_web::dev::Payload) -> Self::Future {
+        let extensions = req.extensions();
+        let session = extensions.get::<crate::models::AccountSession>().cloned();
+        Box::pin(async move {
+            session.ok_or(actix_web::error::ErrorForbidden(
+                "missing account session info",
+            ))
+        })
     }
 }
 
