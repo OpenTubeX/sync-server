@@ -66,7 +66,7 @@ fn collection_limit(collection: &str) -> HandlerResult<usize> {
         "settings" => Ok(2 * MEBIBYTE),
         // Deprecated compatibility collection. Saved channel preferences now
         // belong in `settings`; keep accepting this while old clients remain.
-        "sessions" | "profiles" | "playbackSpeeds" => Ok(8 * MEBIBYTE),
+        "sessions" | "sessionsV2" | "profiles" | "playbackSpeeds" => Ok(8 * MEBIBYTE),
         "subscriptions" | "playlistBookmarks" => Ok(16 * MEBIBYTE),
         "playlists" | "history" => Ok(MAX_ENCRYPTED_SYNC_BYTES),
         _ => Err(HandlerError::ValidationErrorWithContext(
@@ -216,6 +216,7 @@ mod tests {
         assert_eq!(collection_limit("settings").unwrap(), 2 * MEBIBYTE);
         assert_eq!(collection_limit("profiles").unwrap(), 8 * MEBIBYTE);
         assert_eq!(collection_limit("sessions").unwrap(), 8 * MEBIBYTE);
+        assert_eq!(collection_limit("sessionsV2").unwrap(), 8 * MEBIBYTE);
         assert_eq!(collection_limit("subscriptions").unwrap(), 16 * MEBIBYTE);
         assert_eq!(collection_limit("history").unwrap(), 64 * MEBIBYTE);
         assert!(collection_limit("unknown").is_err());

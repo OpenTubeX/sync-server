@@ -236,9 +236,9 @@ content. Before the first encrypted collection is uploaded, the manifest's
 Each legacy domain is removed transactionally only after its matching encrypted
 collection is stored, so an interrupted migration can safely resume.
 Ciphertext uploads have collection-specific limits: 2 MiB for settings, 8 MiB
-for profiles, playback speeds, and sessions, 16 MiB for subscriptions and playlist
-bookmarks, and 64 MiB for playlists and history. The combined active encrypted
-collections for one account cannot exceed 128 MiB.
+for profiles, playback speeds, and versioned or legacy sessions, 16 MiB for
+subscriptions and playlist bookmarks, and 64 MiB for playlists and history.
+The combined active encrypted collections for one account cannot exceed 128 MiB.
 
 ### Secure device pairing
 
