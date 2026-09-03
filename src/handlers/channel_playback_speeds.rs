@@ -33,6 +33,7 @@ use crate::{
 };
 
 const DEPRECATION_DATE: &str = "@1786665600";
+const SUNSET_DATE: &str = "Thu, 01 Oct 2026 00:00:00 GMT";
 
 #[derive(Debug)]
 struct DeprecatedEndpointError(actix_web::Error);
@@ -50,7 +51,7 @@ impl ResponseError for DeprecatedEndpointError {
 
     fn error_response(&self) -> HttpResponse {
         let mut response = self.0.error_response();
-        add_deprecation_header(response.headers_mut());
+        add_deprecation_headers(response.headers_mut());
         response
     }
 }
@@ -81,14 +82,18 @@ async fn deprecation_middleware(
     next: Next<impl MessageBody>,
 ) -> Result<ServiceResponse<impl MessageBody>, actix_web::Error> {
     let mut response = next.call(req).await.map_err(DeprecatedEndpointError)?;
-    add_deprecation_header(response.headers_mut());
+    add_deprecation_headers(response.headers_mut());
     Ok(response)
 }
 
-fn add_deprecation_header(headers: &mut actix_web::http::header::HeaderMap) {
+fn add_deprecation_headers(headers: &mut actix_web::http::header::HeaderMap) {
     headers.insert(
         HeaderName::from_static("deprecation"),
         HeaderValue::from_static(DEPRECATION_DATE),
+    );
+    headers.insert(
+        HeaderName::from_static("sunset"),
+        HeaderValue::from_static(SUNSET_DATE),
     );
 }
 
@@ -191,7 +196,7 @@ async fn delete_channel_playback_speed(
 mod tests {
     use actix_web::{App, HttpResponse, http::StatusCode, middleware::from_fn, test, web};
 
-    use super::{DEPRECATION_DATE, DeprecatedEndpointError, deprecation_middleware};
+    use super::{DEPRECATION_DATE, DeprecatedEndpointError, SUNSET_DATE, deprecation_middleware};
     use crate::handlers::{HandlerError, HandlerResult};
 
     async fn success() -> HttpResponse {
@@ -203,7 +208,7 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn deprecation_header_is_added_when_inner_middleware_returns_an_error() {
+    async fn lifecycle_headers_are_added_when_inner_middleware_returns_an_error() {
         let error: actix_web::Error =
             DeprecatedEndpointError(HandlerError::InvalidToken.into()).into();
         let response = error.error_response();
@@ -216,10 +221,17 @@ mod tests {
                 .expect("deprecation header should be present"),
             DEPRECATION_DATE
         );
+        assert_eq!(
+            response
+                .headers()
+                .get("sunset")
+                .expect("sunset header should be present"),
+            SUNSET_DATE
+        );
     }
 
     #[actix_web::test]
-    async fn deprecation_header_is_added_to_success_and_error_responses() {
+    async fn lifecycle_headers_are_added_to_success_and_error_responses() {
         let app = test::init_service(
             App::new()
                 .wrap(from_fn(deprecation_middleware))
@@ -242,6 +254,13 @@ mod tests {
                     .get("deprecation")
                     .expect("deprecation header should be present"),
                 DEPRECATION_DATE
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get("sunset")
+                    .expect("sunset header should be present"),
+                SUNSET_DATE
             );
         }
     }

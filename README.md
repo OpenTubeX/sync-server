@@ -21,11 +21,11 @@ The dedicated `/v1/channel_playback_speeds` endpoints and encrypted
 saved channel preferences, including playback speeds, in the encrypted
 `settings` collection.
 
-Both deprecated forms remain fully functional during the client migration
-period. Their database table, encrypted collection support, legacy migration,
-and cleanup logic must only be removed after supported clients no longer use
-them. Responses from the dedicated plaintext endpoints include the standard
-`Deprecation` header; no removal date has been scheduled.
+The dedicated plaintext endpoints will be removed on 1 October 2026. Until
+then, their responses include the standard `Deprecation` and `Sunset` headers.
+The encrypted `playbackSpeeds` collection, its database table, legacy
+migration, and cleanup logic remain available until their removal is scheduled
+separately.
 
 This project is based on the [LibreTube sync server](https://github.com/libre-tube/sync-server).
 
