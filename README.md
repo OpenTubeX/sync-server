@@ -21,7 +21,13 @@ The dedicated `/v1/channel_playback_speeds` endpoints and encrypted
 saved channel preferences, including playback speeds, in the encrypted
 `settings` collection. Current clients still read existing `playbackSpeeds` data
 to migrate it into `settings`, but no longer upload the deprecated collection.
-Its absence does not mark legacy encrypted migration as incomplete.
+After successfully syncing speeds into `settings`, current clients acknowledge
+this with `GET /v1/encrypted_sync?playback_speeds_in_settings=true`. For those
+requests, the deprecated collection is no longer required for migration completion.
+Requests without this acknowledgment retain the older completion rule so an
+interrupted migration can still discover speeds in the original encrypted document.
+The presence of opaque `settings` alone is not proof that speeds were migrated.
+Older clients may still recreate a deleted `playbackSpeeds` collection.
 
 The dedicated plaintext endpoints will be removed on 1 October 2026. Until
 then, their responses include the standard `Deprecation` and `Sunset` headers.

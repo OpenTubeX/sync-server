@@ -17,8 +17,8 @@ use crate::{WebData, get_db_conn};
 const MEBIBYTE: usize = 1024 * 1024;
 const MAX_ENCRYPTED_SYNC_BYTES: usize = 64 * MEBIBYTE;
 const MAX_ENCRYPTED_SYNC_ACCOUNT_BYTES: usize = 128 * MEBIBYTE;
-// Deprecated playbackSpeeds is read into settings by current clients and must
-// not be required to finish legacy document migration.
+// Current clients can acknowledge saved playback speeds in settings. Older
+// clients still require the deprecated collection to resume partial migrations.
 const LEGACY_ENCRYPTED_COLLECTIONS: [&str; 5] = [
     "subscriptions",
     "playlists",
@@ -26,6 +26,14 @@ const LEGACY_ENCRYPTED_COLLECTIONS: [&str; 5] = [
     "profiles",
     "playlistBookmarks",
 ];
+
+#[derive(Debug, Default, serde::Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+struct EncryptedSyncManifestQuery {
+    /// The requesting client has successfully synced playback speeds into settings.
+    #[serde(default)]
+    playback_speeds_in_settings: bool,
+}
 
 pub struct EncryptedSyncHandler {}
 
@@ -74,11 +82,12 @@ fn collection_limit(collection: &str) -> HandlerResult<usize> {
     }
 }
 
-#[utoipa::path(responses((status = OK, body = EncryptedSyncManifest)), security(("api_jwt_token" = [])))]
+#[utoipa::path(params(EncryptedSyncManifestQuery), responses((status = OK, body = EncryptedSyncManifest)), security(("api_jwt_token" = [])))]
 #[get("")]
 async fn get_encrypted_sync_manifest(
     account: Account,
     pool: WebData,
+    query: web::Query<EncryptedSyncManifestQuery>,
 ) -> HandlerResult<impl Responder> {
     let mut conn = get_db_conn!(pool);
     let documents = encrypted_sync::get_all(&mut conn, &account.id)
@@ -92,7 +101,11 @@ async fn get_encrypted_sync_manifest(
             .iter()
             .any(|document| document.collection == *collection)
     });
-    let legacy_encrypted_data = !has_all_migrated_collections
+    let has_migrated_playback_speeds = query.playback_speeds_in_settings
+        || documents
+            .iter()
+            .any(|document| document.collection == "playbackSpeeds");
+    let legacy_encrypted_data = !(has_all_migrated_collections && has_migrated_playback_speeds)
         && encrypted_sync::get_legacy_encrypted(&mut conn, &account.id)
             .await
             .map_err(|_| HandlerError::InternalDatabaseError)?
@@ -301,6 +314,15 @@ mod migration_tests {
                     .status()
                     .is_success()
             );
+            // Even an existing settings ciphertext cannot prove that speeds
+            // were migrated: the user may have excluded that setting.
+            let request = test::TestRequest::get().uri("/sync").to_request();
+            request.extensions_mut().insert(account.clone());
+            let manifest: serde_json::Value = test::call_and_read_body_json(&app, request).await;
+            assert_eq!(
+                manifest["legacy_encrypted_data"],
+                collection != "playbackSpeeds"
+            );
         }
         for deleted in [false, true] {
             if deleted {
@@ -312,6 +334,12 @@ mod migration_tests {
             request.extensions_mut().insert(account.clone());
             let manifest: serde_json::Value = test::call_and_read_body_json(&app, request).await;
             assert_eq!(manifest["legacy_data"], false);
+            assert_eq!(manifest["legacy_encrypted_data"], deleted);
+            let request = test::TestRequest::get()
+                .uri("/sync?playback_speeds_in_settings=true")
+                .to_request();
+            request.extensions_mut().insert(account.clone());
+            let manifest: serde_json::Value = test::call_and_read_body_json(&app, request).await;
             assert_eq!(manifest["legacy_encrypted_data"], false);
             assert_eq!(
                 manifest["collections"]
