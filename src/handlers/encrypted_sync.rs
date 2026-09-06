@@ -17,13 +17,12 @@ use crate::{WebData, get_db_conn};
 const MEBIBYTE: usize = 1024 * 1024;
 const MAX_ENCRYPTED_SYNC_BYTES: usize = 64 * MEBIBYTE;
 const MAX_ENCRYPTED_SYNC_ACCOUNT_BYTES: usize = 128 * MEBIBYTE;
-// `playbackSpeeds` is deprecated for new clients, but remains part of legacy
-// document migration until older OpenTubeX versions have been phased out.
-const LEGACY_ENCRYPTED_COLLECTIONS: [&str; 6] = [
+// Deprecated playbackSpeeds is read into settings by current clients and must
+// not be required to finish legacy document migration.
+const LEGACY_ENCRYPTED_COLLECTIONS: [&str; 5] = [
     "subscriptions",
     "playlists",
     "history",
-    "playbackSpeeds",
     "profiles",
     "playlistBookmarks",
 ];
@@ -215,10 +214,126 @@ mod tests {
     fn encrypted_collection_limits_are_scoped_by_data_type() {
         assert_eq!(collection_limit("settings").unwrap(), 2 * MEBIBYTE);
         assert_eq!(collection_limit("profiles").unwrap(), 8 * MEBIBYTE);
+        assert_eq!(collection_limit("playbackSpeeds").unwrap(), 8 * MEBIBYTE);
         assert_eq!(collection_limit("sessions").unwrap(), 8 * MEBIBYTE);
         assert_eq!(collection_limit("sessionsV2").unwrap(), 8 * MEBIBYTE);
         assert_eq!(collection_limit("subscriptions").unwrap(), 16 * MEBIBYTE);
         assert_eq!(collection_limit("history").unwrap(), 64 * MEBIBYTE);
         assert!(collection_limit("unknown").is_err());
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod migration_tests {
+    use actix_web::{App, HttpMessage, test, web};
+    use diesel::connection::SimpleConnection;
+    use diesel_async::RunQueryDsl;
+    use diesel_async::pooled_connection::{AsyncDieselConnectionManager, bb8::Pool};
+    use diesel_migrations::MigrationHarness;
+
+    use crate::{DbConnection, MIGRATIONS, models::Account};
+
+    #[actix_rt::test]
+    async fn deleting_migrated_playback_speeds_does_not_restart_legacy_migration() {
+        let pool = Pool::builder()
+            .max_size(1)
+            .build(AsyncDieselConnectionManager::<DbConnection>::new(
+                ":memory:",
+            ))
+            .await
+            .unwrap();
+        let account = Account {
+            id: "owner".into(),
+            name_hash: "owner-hash".into(),
+            password_hash: None,
+            oidc_sub: None,
+            legacy_tokens_enabled: false,
+            session_generation: 0,
+        };
+        {
+            let mut conn = pool.get().await.unwrap();
+            conn.spawn_blocking(|conn| {
+                conn.run_pending_migrations(MIGRATIONS).unwrap();
+                conn.batch_execute(
+                    "INSERT INTO account (id, name_hash) VALUES ('owner', 'owner-hash');
+                     INSERT INTO encrypted_sync_single_document (account_id, revision, payload)
+                       VALUES ('owner', 1, 'legacy-ciphertext');",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        }
+        let app = test::init_service(
+            App::new().app_data(web::Data::new(pool.clone())).service(
+                web::scope("/sync")
+                    .service(super::get_encrypted_sync_manifest)
+                    .service(super::get_legacy_encrypted_sync)
+                    .service(super::get_encrypted_sync_collection)
+                    .service(super::put_encrypted_sync_collection),
+            ),
+        )
+        .await;
+        // Incomplete migrations must still expose the original document.
+        let request = test::TestRequest::get().uri("/sync").to_request();
+        request.extensions_mut().insert(account.clone());
+        let manifest: serde_json::Value = test::call_and_read_body_json(&app, request).await;
+        assert_eq!(manifest["legacy_encrypted_data"], true);
+
+        // Use the actual PUT endpoint, including deprecated collection support.
+        for collection in [
+            "subscriptions",
+            "playlists",
+            "history",
+            "profiles",
+            "playlistBookmarks",
+            "settings",
+            "playbackSpeeds",
+        ] {
+            let request = test::TestRequest::put()
+                .uri(&format!("/sync/{collection}"))
+                .set_json(serde_json::json!({ "revision": 0, "payload": "ciphertext" }))
+                .to_request();
+            request.extensions_mut().insert(account.clone());
+            assert!(
+                test::call_service(&app, request)
+                    .await
+                    .status()
+                    .is_success()
+            );
+        }
+        for deleted in [false, true] {
+            if deleted {
+                let mut conn = pool.get().await.unwrap();
+                diesel::sql_query("DELETE FROM encrypted_sync WHERE account_id = 'owner' AND collection = 'playbackSpeeds'")
+                    .execute(&mut conn).await.unwrap();
+            }
+            let request = test::TestRequest::get().uri("/sync").to_request();
+            request.extensions_mut().insert(account.clone());
+            let manifest: serde_json::Value = test::call_and_read_body_json(&app, request).await;
+            assert_eq!(manifest["legacy_data"], false);
+            assert_eq!(manifest["legacy_encrypted_data"], false);
+            assert_eq!(
+                manifest["collections"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry["collection"] == "playbackSpeeds"),
+                !deleted
+            );
+        }
+        let request = test::TestRequest::get()
+            .uri("/sync/playbackSpeeds")
+            .to_request();
+        request.extensions_mut().insert(account.clone());
+        let collection: serde_json::Value = test::call_and_read_body_json(&app, request).await;
+        assert_eq!(collection["revision"], 0);
+        assert!(collection["payload"].is_null());
+
+        // The legacy document stays readable for older clients.
+        let request = test::TestRequest::get().uri("/sync/legacy").to_request();
+        request.extensions_mut().insert(account);
+        let legacy: serde_json::Value = test::call_and_read_body_json(&app, request).await;
+        assert_eq!(legacy["payload"], "legacy-ciphertext");
     }
 }

@@ -19,7 +19,9 @@ readable data.
 The dedicated `/v1/channel_playback_speeds` endpoints and encrypted
 `playbackSpeeds` collection are deprecated. Current OpenTubeX clients store all
 saved channel preferences, including playback speeds, in the encrypted
-`settings` collection.
+`settings` collection. Current clients still read existing `playbackSpeeds` data
+to migrate it into `settings`, but no longer upload the deprecated collection.
+Its absence does not mark legacy encrypted migration as incomplete.
 
 The dedicated plaintext endpoints will be removed on 1 October 2026. Until
 then, their responses include the standard `Deprecation` and `Sunset` headers.
