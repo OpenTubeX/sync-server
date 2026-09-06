@@ -14,3 +14,6 @@ pub mod video;
 pub mod watch_history;
 
 type DbError = diesel::result::Error;
+
+#[cfg(all(test, feature = "sqlite"))]
+mod ownership_tests;

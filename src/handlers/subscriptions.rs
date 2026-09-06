@@ -295,6 +295,7 @@ async fn update_subscription_group(
 
     match update_existing_subscription_group(&mut conn, subscription_group).await {
         Ok(group) => Ok(HttpResponse::Ok().json(group)),
+        Err(diesel::result::Error::NotFound) => Err(HandlerError::SubscriptionGroupNotFound),
         Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
             err.to_string(),
         )),
