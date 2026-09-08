@@ -65,6 +65,7 @@ pub(crate) fn sync_capabilities() -> SyncCapabilities {
         history_page_size: MAX_PAGE_SIZE,
         key_pairing: 1,
         account_sessions: 1,
+        seen_videos: 1,
     }
 }
 
@@ -74,7 +75,7 @@ fn collection_limit(collection: &str) -> HandlerResult<usize> {
         // Deprecated compatibility collection. Saved channel preferences now
         // belong in `settings`; keep accepting this while old clients remain.
         "sessions" | "sessionsV2" | "profiles" | "playbackSpeeds" => Ok(8 * MEBIBYTE),
-        "subscriptions" | "playlistBookmarks" => Ok(16 * MEBIBYTE),
+        "subscriptions" | "playlistBookmarks" | "seenVideos" => Ok(16 * MEBIBYTE),
         "playlists" | "history" => Ok(MAX_ENCRYPTED_SYNC_BYTES),
         _ => Err(HandlerError::ValidationErrorWithContext(
             "unknown encrypted sync collection".to_owned(),
@@ -232,6 +233,8 @@ mod tests {
         assert_eq!(collection_limit("sessionsV2").unwrap(), 8 * MEBIBYTE);
         assert_eq!(collection_limit("subscriptions").unwrap(), 16 * MEBIBYTE);
         assert_eq!(collection_limit("history").unwrap(), 64 * MEBIBYTE);
+        assert_eq!(collection_limit("seenVideos").unwrap(), 16 * MEBIBYTE);
+        assert_eq!(super::sync_capabilities().seen_videos, 1);
         assert!(collection_limit("unknown").is_err());
     }
 }

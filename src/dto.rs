@@ -31,6 +31,7 @@ pub struct SyncCapabilities {
     pub history_page_size: u32,
     pub key_pairing: u8,
     pub account_sessions: u8,
+    pub seen_videos: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
