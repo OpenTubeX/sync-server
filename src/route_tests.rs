@@ -198,8 +198,8 @@ async fn account_sessions_alias_matches_success_and_revoked_authentication() {
     )
     .await
     .unwrap();
-    let mut failures = Vec::new();
     for (method, path) in [(Method::GET, "sessions"), (Method::DELETE, "delete")] {
+        let mut failures = Vec::new();
         for prefix in ["/v1", ""] {
             let request = test::TestRequest::default()
                 .method(method.clone())
@@ -211,8 +211,8 @@ async fn account_sessions_alias_matches_success_and_revoked_authentication() {
             assert_eq!(response.0, StatusCode::UNAUTHORIZED);
             failures.push(response);
         }
+        assert_eq!(failures[0], failures[1], "{method} /account/{path}");
     }
-    assert!(failures.windows(2).all(|pair| pair[0] == pair[1]));
 }
 
 #[actix_web::test]

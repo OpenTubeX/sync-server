@@ -23,6 +23,9 @@ and responses, without redirects. Unprefixed paths remain aliases for version 1
 if a later API version is introduced. The API docs at `/docs` list canonical
 `/v1` paths.
 
+Reverse proxy or WAF rules that match `/v1` paths must also cover their
+unprefixed aliases, such as `/account/delete` alongside `/v1/account/delete`.
+
 ## Deprecated playback-speed API
 
 The dedicated `/v1/channel_playback_speeds` endpoints and encrypted
