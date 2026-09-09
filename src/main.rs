@@ -18,7 +18,7 @@ use diesel_async::{AsyncConnection, SimpleAsyncConnection};
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 use log::error;
 use utoipa::OpenApi;
-use utoipa_actix_web::AppExt;
+use utoipa_actix_web::{AppExt, service_config::ServiceConfig};
 use utoipa_scalar::{Scalar, Servable};
 
 use crate::{
@@ -109,17 +109,7 @@ async fn main() -> io::Result<()> {
             // add DB pool handle to app data; enables use of `web::Data<DbPool>` extractor
             .app_data(web::Data::new(pool.clone()))
             .app_data(rate_limiter.clone())
-            .service(
-                utoipa_actix_web::scope("/v1")
-                    .service(UserHandler::get_service())
-                    .service(ChannelPlaybackSpeedsHandler::get_service())
-                    .service(SubscriptionsHandler::get_service())
-                    .service(PlaylistsHandler::get_service())
-                    .service(PlaylistBookmarksHandler::get_service())
-                    .service(WatchHistoryHandler::get_service())
-                    .service(EncryptedSyncHandler::get_service())
-                    .service(PairingHandler::get_service()),
-            )
+            .configure(configure_api_routes)
             .split_for_parts();
 
         // add additional meta and security info
@@ -135,6 +125,33 @@ async fn main() -> io::Result<()> {
     .run()
     .await
 }
+
+fn configure_v1_routes(config: &mut ServiceConfig<'_>) {
+    config
+        .service(UserHandler::get_service())
+        .service(ChannelPlaybackSpeedsHandler::get_service())
+        .service(SubscriptionsHandler::get_service())
+        .service(PlaylistsHandler::get_service())
+        .service(PlaylistBookmarksHandler::get_service())
+        .service(WatchHistoryHandler::get_service())
+        .service(EncryptedSyncHandler::get_service())
+        .service(PairingHandler::get_service());
+}
+
+fn configure_api_routes(config: &mut ServiceConfig<'_>) {
+    // Register unprefixed v1 aliases directly, without an empty scope that could
+    // swallow docs or health routes. Only canonical paths enter the OpenAPI spec.
+    config.map(|config| {
+        configure_v1_routes(&mut ServiceConfig::new(config));
+        config
+    });
+    // Register canonical routes last so named URLs (including OIDC callbacks)
+    // continue to resolve to /v1.
+    config.service(utoipa_actix_web::scope("/v1").configure(configure_v1_routes));
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod route_tests;
 
 /// Initialize database connection pool based on `DATABASE_URL` environment variable.
 ///
