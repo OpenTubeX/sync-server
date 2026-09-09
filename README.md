@@ -14,6 +14,15 @@ that may already exist. After that first upload, plaintext sync endpoints are
 rejected for the account so an older client cannot accidentally repopulate
 readable data.
 
+## API paths
+
+All `/v1` API endpoints also accept the same path without `/v1`. For example,
+`DELETE /account/delete` and `GET /account/sessions` are aliases for their `/v1`
+routes. Both forms use the same handlers, authentication, validation, rate limits,
+and responses, without redirects. Unprefixed paths remain aliases for version 1
+if a later API version is introduced. The API docs at `/docs` list canonical
+`/v1` paths.
+
 ## Deprecated playback-speed API
 
 The dedicated `/v1/channel_playback_speeds` endpoints and encrypted
