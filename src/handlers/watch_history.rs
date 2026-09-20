@@ -8,7 +8,7 @@ use crate::{
         channel::create_or_update_channel,
         video::create_or_update_video,
         watch_history::{
-            add_or_update_video_to_watch_history, clear_watch_history_by_account_id,
+            self, add_or_update_video_to_watch_history, clear_watch_history_by_account_id,
             get_watch_history_by_account_id, get_watch_history_entry,
             remove_video_from_watch_history,
         },
@@ -51,7 +51,8 @@ enum WatchHistoryOrder {
 }
 #[derive(Deserialize)]
 struct WatchHistoryPaginationRequest {
-    page: u32,
+    page: Option<u32>,
+    page_size: Option<u32>,
     state: Option<WatchedState>,
     order: Option<WatchHistoryOrder>,
 }
@@ -69,12 +70,12 @@ async fn get_watch_history(
         .state
         .clone()
         .map(|s| serde_json::ser::to_string(&s).unwrap());
-    dbg!(&watched_state);
 
     match get_watch_history_by_account_id(
         &mut conn,
         &account.id,
-        params.page,
+        params.page.unwrap_or(1),
+        params.page_size.unwrap_or(watch_history::MAX_PAGE_SIZE),
         &watched_state,
         params.order == Some(WatchHistoryOrder::AddedDateAscending),
     )

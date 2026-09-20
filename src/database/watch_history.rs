@@ -10,12 +10,13 @@ use crate::{
     schema::{channel, video, watch_history::dsl::*},
 };
 
-const PAGE_SIZE: i64 = 50;
+pub const MAX_PAGE_SIZE: u32 = 50;
 
 pub async fn get_watch_history_by_account_id(
     conn: &mut DbConnection,
     account_id_: &str,
     page_num: u32,
+    page_size: u32,
     state: &Option<String>,
     sort_by_date_ascending: bool,
 ) -> Result<Vec<(WatchHistoryItem, Video, Channel)>, DbError> {
@@ -34,9 +35,11 @@ pub async fn get_watch_history_by_account_id(
         query = query.order(added_date.desc())
     }
 
+    let page_size = page_size.min(MAX_PAGE_SIZE) as i64;
+
     query
-        .offset(PAGE_SIZE * (page_num - 1) as i64)
-        .limit(PAGE_SIZE)
+        .offset(page_size * (page_num - 1) as i64)
+        .limit(page_size)
         .inner_join(video::table.inner_join(channel::table))
         .select((
             WatchHistoryItem::as_select(),
