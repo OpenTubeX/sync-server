@@ -42,14 +42,14 @@ impl ScopedHandler for WatchHistoryHandler {
     }
 }
 
-#[derive(Deserialize, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Deserialize, Eq, PartialEq, PartialOrd, Ord, utoipa::ToSchema)]
 enum WatchHistoryOrder {
     #[serde(rename = "added_date_asc")]
     AddedDateAscending,
     #[serde(rename = "added_date_desc")]
     AddedDateDescending,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 struct WatchHistoryPaginationRequest {
     page: Option<u32>,
     page_size: Option<u32>,
@@ -57,7 +57,7 @@ struct WatchHistoryPaginationRequest {
     order: Option<WatchHistoryOrder>,
 }
 
-#[utoipa::path(responses((status = OK, body = Vec<ExtendedWatchHistoryItem>)), params(("page" = u32, Query)), security(("api_jwt_token" = [])))]
+#[utoipa::path(responses((status = OK, body = Vec<ExtendedWatchHistoryItem>)), params(WatchHistoryPaginationRequest), security(("api_jwt_token" = [])))]
 #[get("/")]
 async fn get_watch_history(
     account: Account,

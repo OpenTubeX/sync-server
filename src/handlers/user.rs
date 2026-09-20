@@ -204,14 +204,14 @@ pub async fn auth_middleware(
     next.call(req).await
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 struct OidcAuthenticationRequest {
     /// Url to redirect to once authentication succeeded.
     /// Passes a `token` query parameter to the URL, which is a valid JWT for the authenticated account.
     redirect_url: String,
 }
 
-#[utoipa::path]
+#[utoipa::path(params(OidcAuthenticationRequest))]
 #[get("/oidc/authenticate")]
 async fn authenticate_oidc_account(
     req: HttpRequest,
@@ -240,13 +240,13 @@ fn oidc_username_hash(oidc_sub: &str) -> String {
     hash_accountname(&username, CONFIG.secret.as_bytes())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 struct OidcCallbackData {
     code: String,
     state: String,
 }
 
-#[utoipa::path]
+#[utoipa::path(params(OidcCallbackData))]
 #[get("/oidc/authenticate/callback")]
 async fn authenticate_oidc_account_callback(
     pool: WebData,
@@ -291,7 +291,7 @@ async fn authenticate_oidc_account_callback(
     }
 }
 
-#[utoipa::path]
+#[utoipa::path(params(OidcAuthenticationRequest))]
 #[get("/oidc/delete")]
 async fn delete_oidc_account(
     req: HttpRequest,
@@ -312,7 +312,7 @@ async fn delete_oidc_account(
     Ok(Redirect::to(redirect_url))
 }
 
-#[utoipa::path]
+#[utoipa::path(params(OidcCallbackData))]
 #[get("/oidc/delete/callback")]
 async fn delete_oidc_account_callback(
     pool: WebData,
