@@ -38,6 +38,8 @@ pub struct SyncCapabilities {
 pub struct HealthResponse {
     pub status: String,
     pub capabilities: SyncCapabilities,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privacy_policy_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

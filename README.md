@@ -77,6 +77,7 @@ There are two ways to configure `sync-server`
 | Config option                   | Description                                          | Default | Example              |
 | ----------------------          | ---------------------------------------------------- | ------- | -------------------- |
 | `database_url`                  | Connection string for the database                   | None    | sqlite://./db.sql    |
+| `privacy_policy_url`            | Optional absolute HTTP(S) privacy policy URL without credentials, advertised in `/health`. Environment variable: `PRIVACY_POLICY_URL` | None | `https://example.org/privacy` |
 | `secret_key`                    | Used to sign authentication tokens. Required, min. 32 bytes | None | output of `openssl rand -hex 32` |
 | `username_secret`               | Used to derive account name hashes. Set it so that `secret_key` stays rotatable | falls back to `secret_key` | output of `openssl rand -hex 32` |
 | `trust_forwarded_for`           | Derive rate limiting client addresses from `X-Forwarded-For`. Required behind a reverse proxy | `false` | `true` |
@@ -246,6 +247,8 @@ other access.
 ### Enhanced privacy sync
 
 `GET /health` returns the server's capabilities alongside its health status.
+When configured, it also includes a top-level `privacy_policy_url` string so
+clients can link to the operator's privacy policy. The field is omitted when unset.
 Authenticated clients read the collection manifest from `GET /v1/encrypted_sync`
 and transfer individual opaque collections through `GET` and `PUT`
 `/v1/encrypted_sync/{collection}`. Each collection has an independent revision;
