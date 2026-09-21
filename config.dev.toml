@@ -10,6 +10,8 @@ secret_key = ""
 # trusted_proxy_hops = 1
 allow_registration = true
 validate_submitted_metadata = true
+# Optional public policy link advertised to clients through /health.
+# privacy_policy_url = "https://example.org/privacy"
 
 # Remove this section if OIDC is not configured.
 [oidc]

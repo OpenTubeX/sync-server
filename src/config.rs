@@ -64,6 +64,8 @@ pub struct Config {
     pub validate_submitted_metadata: bool,
     pub database_url: String,
     #[serde(default)]
+    pub privacy_policy_url: Option<String>,
+    #[serde(default)]
     pub migration_approval: Option<String>,
     #[serde(default)]
     pub oidc: Option<OidcConfig>,
@@ -117,6 +119,19 @@ fn validate_secret(name: &str, secret: &str) -> Result<(), ConfigError> {
 }
 
 fn validate_config(config: &Config) -> Result<(), ConfigError> {
+    if let Some(value) = &config.privacy_policy_url {
+        let valid = url::Url::parse(value).is_ok_and(|url| {
+            matches!(url.scheme(), "http" | "https")
+                && url.has_host()
+                && url.username().is_empty()
+                && url.password().is_none()
+        });
+        if !valid {
+            return Err(ConfigError::Message(
+                "privacy_policy_url must be an absolute HTTP(S) URL without credentials".to_owned(),
+            ));
+        }
+    }
     validate_secret("secret_key", &config.secret)?;
     if let Some(username_secret) = config.dedicated_username_secret() {
         validate_secret("username_secret", username_secret)?;
@@ -158,12 +173,33 @@ mod tests {
             allow_registration: true,
             validate_submitted_metadata: true,
             database_url: "./db.sqlite".to_owned(),
+            privacy_policy_url: None,
             migration_approval: None,
             oidc: None,
         }
     }
 
     const STRONG: &str = "6f1c2f0e8a4b5d3c7e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d";
+
+    #[test]
+    fn privacy_policy_url_is_optional_and_must_be_a_web_url() {
+        let mut config = config_with(STRONG, None);
+        assert!(validate_config(&config).is_ok());
+        for value in ["https://example.org/privacy", "http://localhost/privacy"] {
+            config.privacy_policy_url = Some(value.to_owned());
+            assert!(validate_config(&config).is_ok());
+        }
+        for value in [
+            "",
+            "/privacy",
+            "javascript:alert(1)",
+            "file:///tmp/policy",
+            "https://user:secret@example.org",
+        ] {
+            config.privacy_policy_url = Some(value.to_owned());
+            assert!(validate_config(&config).is_err(), "{value}");
+        }
+    }
 
     /// Asserts on the message, not just that validation failed: every
     /// placeholder is also shorter than the minimum, so `is_err()` alone would

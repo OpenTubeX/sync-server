@@ -1,9 +1,11 @@
 # OpenTubeX Sync Server Privacy Policy
 
-Last updated: September 1, 2026
+Last updated: September 21, 2026
 
 This policy applies to the public OpenTubeX sync server at
-[sync.d3sox.me](https://sync.d3sox.me). Other operators running this
+[sync.opentubex.org](https://sync.opentubex.org), also accessible through
+[sync.d3sox.me](https://sync.d3sox.me). Both addresses use the same service and
+account database. Other operators running this
 open-source software are responsible for their own privacy notices.
 
 ## Operator
