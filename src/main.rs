@@ -42,6 +42,7 @@ mod oidc;
 mod openapi;
 mod rate_limit;
 mod schema;
+mod sync_notifications;
 mod validation;
 
 static CONFIG: LazyLock<config::Config> = LazyLock::new(|| match config::build_config() {

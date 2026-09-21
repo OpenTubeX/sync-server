@@ -32,6 +32,7 @@ pub struct SyncCapabilities {
     pub key_pairing: u8,
     pub account_sessions: u8,
     pub seen_videos: u8,
+    pub live_sync: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -64,6 +65,7 @@ pub struct EncryptedSyncCollectionResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PutEncryptedSync {
+    pub activity: Option<String>,
     pub revision: i64,
     pub payload: String,
 }

@@ -183,3 +183,14 @@ diesel::allow_tables_to_appear_in_same_query!(
     video,
     watch_history,
 );
+
+diesel::table! {
+    sync_event (id) {
+        id -> Text,
+        account_id -> Text,
+        recipient -> Text,
+        payload -> Text,
+        created_at -> BigInt,
+        expires_at -> BigInt,
+    }
+}

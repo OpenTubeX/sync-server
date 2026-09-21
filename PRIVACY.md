@@ -42,6 +42,12 @@ never receives the passphrase or plaintext. The operator can still observe
 account activity, request timing, collection names, and approximate data size.
 The server cannot recover a lost privacy passphrase.
 
+**Account activity and device requests.** Compatible clients upload encrypted
+activity records and requests to open a video on another device. The server
+stores each encrypted payload with an event ID, account ID, recipient device ID
+for device requests, and creation and expiry times. Setting names and values,
+device display names, and requested video details remain encrypted.
+
 **Device pairing.** Secure device pairing temporarily stores a one-time session
 ID, SHA-256 recipient-token hash, recipient public key, device identifiers, the
 receiving device's user-chosen display name, expiry time, and
@@ -110,9 +116,15 @@ request.
 
 ## Retention and deletion
 
-Account and sync data remain in the active database until you delete individual
-items or your account. Account deletion removes the account and its linked data
-from the active database. Shared public YouTube metadata may remain.
+Account data and synced collections remain in the active database until you
+delete individual items or your account. Account deletion removes the account
+and its linked data from the active database. Shared public YouTube metadata may
+remain.
+
+Encrypted activity is limited to the latest 100 batches per account and expires
+after 30 days. Pending device requests are limited to 100 per account and expire
+after 24 hours; a recipient's acknowledgment deletes its request. Expired event
+records are removed by a background task, normally within one hour.
 
 Account sessions remain until their one-year authentication token expires.
 Revocation prevents authentication immediately but retains the session as a

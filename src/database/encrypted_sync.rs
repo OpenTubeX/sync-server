@@ -115,17 +115,6 @@ async fn get_stored_bytes(conn: &mut DbConnection, owner_id: &str) -> Result<i64
     .map(|result| result.bytes)
 }
 
-pub async fn get_all(
-    conn: &mut DbConnection,
-    owner_id: &str,
-) -> Result<Vec<EncryptedSync>, DbError> {
-    encrypted_sync
-        .filter(account_id.eq(owner_id))
-        .select(EncryptedSync::as_select())
-        .load(conn)
-        .await
-}
-
 pub async fn get(
     conn: &mut DbConnection,
     owner_id: &str,
@@ -173,6 +162,18 @@ pub async fn create(conn: &mut DbConnection, document: &EncryptedSync) -> Result
     Ok(())
 }
 
+pub async fn revisions(
+    conn: &mut DbConnection,
+    owner: &str,
+) -> Result<Vec<(String, i64)>, DbError> {
+    encrypted_sync
+        .filter(account_id.eq(owner))
+        .order(collection.asc())
+        .select((collection, encrypted_revision))
+        .load(conn)
+        .await
+}
+
 pub async fn save(
     conn: &mut DbConnection,
     owner_id: &str,
@@ -180,6 +181,7 @@ pub async fn save(
     expected_revision: i64,
     new_payload: &str,
     max_account_bytes: usize,
+    activity: Option<(&str, i64)>,
 ) -> Result<SaveResult, DbError> {
     conn.transaction(|conn| {
         Box::pin(async move {
@@ -238,6 +240,9 @@ pub async fn save(
                 clear_legacy_collection(conn, owner_id, collection_name).await?;
             }
 
+            if let Some((payload, now)) = activity {
+                crate::database::sync_event::append(conn, owner_id, "", payload, now).await?;
+            }
             Ok(SaveResult::Saved)
         })
     })
