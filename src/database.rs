@@ -17,3 +17,5 @@ type DbError = diesel::result::Error;
 
 #[cfg(all(test, feature = "sqlite"))]
 mod ownership_tests;
+
+pub mod sync_event;

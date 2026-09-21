@@ -15,6 +15,7 @@ const MAX_DEVICE_NAME_BYTES: usize = 240;
 enum SessionKind {
     Account,
     Pairing,
+    SyncEvents,
 }
 
 impl SessionKind {
@@ -22,6 +23,7 @@ impl SessionKind {
         match self {
             Self::Account => "account",
             Self::Pairing => "pairing",
+            Self::SyncEvents => "sync-event",
         }
     }
 }
@@ -32,7 +34,8 @@ pub fn start_expired_session_cleanup(pool: crate::DbPool) {
         Duration::from_secs(60 * 60),
         SessionKind::Account,
     );
-    spawn_cleanup(pool, Duration::from_secs(30), SessionKind::Pairing);
+    spawn_cleanup(pool.clone(), Duration::from_secs(30), SessionKind::Pairing);
+    spawn_cleanup(pool, Duration::from_secs(60 * 60), SessionKind::SyncEvents);
 }
 
 fn spawn_cleanup(pool: crate::DbPool, interval: Duration, kind: SessionKind) {
@@ -57,6 +60,9 @@ fn spawn_cleanup(pool: crate::DbPool, interval: Duration, kind: SessionKind) {
             let result = match kind {
                 SessionKind::Account => account_session::delete_expired(&mut conn, now).await,
                 SessionKind::Pairing => pairing::delete_expired(&mut conn, now).await,
+                SessionKind::SyncEvents => {
+                    crate::database::sync_event::delete_expired(&mut conn, now).await
+                }
             };
             if let Err(error) = result {
                 log::error!(

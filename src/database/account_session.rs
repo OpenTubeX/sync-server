@@ -149,18 +149,35 @@ pub async fn revoke(
     current_generation: i64,
     now: i64,
 ) -> Result<bool, DbError> {
-    diesel::update(
-        account_session
-            .filter(id.eq(session_id))
-            .filter(account_id.eq(owner_id))
-            .filter(generation.eq(current_generation))
-            .filter(pending_pairing.eq(false))
-            .filter(revoked_at.is_null()),
-    )
-    .set(revoked_at.eq(now))
-    .execute(conn)
+    conn.transaction(|conn| {
+        Box::pin(async move {
+            // Device request sends take this same lock before validating recipients.
+            let locked = diesel::update(
+                schema::account::table
+                    .find(owner_id)
+                    .filter(schema::account::session_generation.eq(current_generation)),
+            )
+            .set(schema::account::id.eq(owner_id))
+            .execute(conn)
+            .await?;
+            if locked != 1 {
+                return Ok(false);
+            }
+            diesel::update(
+                account_session
+                    .filter(id.eq(session_id))
+                    .filter(account_id.eq(owner_id))
+                    .filter(generation.eq(current_generation))
+                    .filter(pending_pairing.eq(false))
+                    .filter(revoked_at.is_null()),
+            )
+            .set(revoked_at.eq(now))
+            .execute(conn)
+            .await
+            .map(|updated| updated == 1)
+        })
+    })
     .await
-    .map(|updated| updated == 1)
 }
 
 pub async fn change_password_and_revoke_others(
