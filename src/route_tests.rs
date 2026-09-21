@@ -103,6 +103,43 @@ async fn response_snapshot(
 }
 
 #[actix_web::test]
+async fn post_marks_round_trip_independently_of_older_video_clients() {
+    let pool = pool().await;
+    let token = seed_account(&pool).await;
+    let (app, _) = App::new()
+        .into_utoipa_app()
+        .app_data(web::Data::new(pool))
+        .app_data(web::Data::new(RateLimiter::default()))
+        .configure(configure_api_routes)
+        .split_for_parts();
+    let app = test::init_service(app).await;
+    for (collection, payload) in [
+        ("seenPosts", "encrypted-post-marks"),
+        ("seenVideos", "older-client-video-marks"),
+    ] {
+        let request = test::TestRequest::put()
+            .uri(&format!("/v1/encrypted_sync/{collection}"))
+            .insert_header(("Authorization", token.clone()))
+            .set_json(json!({ "revision": 0, "payload": payload }))
+            .to_request();
+        assert_eq!(test::call_service(&app, request).await.status(), StatusCode::OK);
+    }
+    let stale = test::TestRequest::put()
+        .uri("/v1/encrypted_sync/seenPosts")
+        .insert_header(("Authorization", token.clone()))
+        .set_json(json!({ "revision": 0, "payload": "stale-post-marks" }))
+        .to_request();
+    assert_eq!(test::call_service(&app, stale).await.status(), StatusCode::CONFLICT);
+    let request = test::TestRequest::get()
+        .uri("/v1/encrypted_sync/seenPosts")
+        .insert_header(("Authorization", token))
+        .to_request();
+    let result: Value = test::call_and_read_body_json(&app, request).await;
+    assert_eq!(result["revision"], 1);
+    assert_eq!(result["payload"], "encrypted-post-marks");
+}
+
+#[actix_web::test]
 async fn all_v1_routes_have_matching_aliases() {
     let (app, api) = App::new()
         .into_utoipa_app()

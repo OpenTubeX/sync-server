@@ -32,6 +32,7 @@ pub struct SyncCapabilities {
     pub key_pairing: u8,
     pub account_sessions: u8,
     pub seen_videos: u8,
+    pub seen_posts: u8,
     pub live_sync: u8,
 }
 

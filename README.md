@@ -260,7 +260,9 @@ Each legacy domain is removed transactionally only after its matching encrypted
 collection is stored, so an interrupted migration can safely resume.
 Ciphertext uploads have collection-specific limits: 2 MiB for settings, 8 MiB
 for profiles, playback speeds, and versioned or legacy sessions, 16 MiB for
-subscriptions and playlist bookmarks, and 64 MiB for playlists and history.
+subscriptions, playlist bookmarks, and seen-video or seen-post marks, and 64 MiB
+for playlists and history. The `seen_posts: 1` capability enables the separate
+`seenPosts` collection, so older clients syncing `seenVideos` cannot erase post marks.
 The combined active encrypted collections for one account cannot exceed 128 MiB.
 
 ### Secure device pairing

@@ -78,6 +78,7 @@ pub(crate) fn sync_capabilities() -> SyncCapabilities {
         key_pairing: 1,
         account_sessions: 1,
         seen_videos: 1,
+        seen_posts: 1,
         live_sync: 1,
     }
 }
@@ -88,7 +89,7 @@ fn collection_limit(collection: &str) -> HandlerResult<usize> {
         // Deprecated compatibility collection. Saved channel preferences now
         // belong in `settings`; keep accepting this while old clients remain.
         "sessions" | "sessionsV2" | "profiles" | "playbackSpeeds" => Ok(8 * MEBIBYTE),
-        "subscriptions" | "playlistBookmarks" | "seenVideos" => Ok(16 * MEBIBYTE),
+        "subscriptions" | "playlistBookmarks" | "seenVideos" | "seenPosts" => Ok(16 * MEBIBYTE),
         "playlists" | "history" => Ok(MAX_ENCRYPTED_SYNC_BYTES),
         _ => Err(HandlerError::ValidationErrorWithContext(
             "unknown encrypted sync collection".to_owned(),
@@ -411,6 +412,13 @@ async fn acknowledge_device_request(
 #[cfg(test)]
 mod tests {
     use super::{MEBIBYTE, collection_limit};
+
+    #[test]
+    fn seen_posts_are_a_separate_advertised_encrypted_collection() {
+        assert_eq!(collection_limit("seenPosts").unwrap(), 16 * MEBIBYTE);
+        let capabilities = serde_json::to_value(super::sync_capabilities()).unwrap();
+        assert_eq!(capabilities["seen_posts"], 1);
+    }
 
     #[test]
     fn encrypted_collection_limits_are_scoped_by_data_type() {
