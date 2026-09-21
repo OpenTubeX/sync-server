@@ -213,6 +213,13 @@ async fn put_encrypted_sync_collection(
     {
         return Err(HandlerError::EncryptedSyncTooLarge);
     }
+    if form
+        .activity
+        .as_ref()
+        .is_some_and(|payload| payload.is_empty())
+    {
+        return Err(HandlerError::ValidationError);
+    }
     let now = now_ms()?;
     match encrypted_sync::save(
         &mut conn,
@@ -235,7 +242,7 @@ async fn put_encrypted_sync_collection(
         }
     }
 
-    notify(&account.id);
+    notify(&account.id, None);
     Ok(HttpResponse::Ok().json(EncryptedSyncCollectionResponse {
         collection,
         revision: next_revision,
@@ -246,6 +253,7 @@ async fn put_encrypted_sync_collection(
 #[derive(serde::Deserialize, utoipa::IntoParams)]
 #[into_params(parameter_in = Query)]
 struct ChangesQuery {
+    /// Opaque cursor from the previous /changes response.
     #[serde(default)]
     since: String,
 }
@@ -275,7 +283,7 @@ async fn get_sync_changes(
     query: web::Query<ChangesQuery>,
 ) -> HandlerResult<impl Responder> {
     // Register before reading the durable cursor so concurrent commits cannot be missed.
-    let waiter = ChangeWaiter::new(&account.id);
+    let waiter = ChangeWaiter::new(&account.id, &session.device_id);
     let mut cursor = change_cursor(&pool, &account.id, &session.device_id).await?;
     if cursor == query.since {
         let _ = actix_web::rt::time::timeout(std::time::Duration::from_secs(25), waiter).await;
@@ -288,13 +296,21 @@ async fn get_sync_changes(
         .json(serde_json::json!({ "cursor": cursor })))
 }
 
-#[utoipa::path(params(ChangesQuery), security(("api_jwt_token" = [])))]
+#[derive(serde::Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+struct EventsQuery {
+    /// Last processed broadcast event ID, not the opaque /changes cursor.
+    #[serde(default)]
+    since: String,
+}
+
+#[utoipa::path(params(EventsQuery), security(("api_jwt_token" = [])))]
 #[get("/events")]
 async fn get_sync_events(
     account: Account,
     session: AccountSession,
     pool: WebData,
-    query: web::Query<ChangesQuery>,
+    query: web::Query<EventsQuery>,
 ) -> HandlerResult<impl Responder> {
     let mut conn = get_db_conn!(pool);
     let events = sync_event::list(&mut conn, &account.id, &session.device_id, now_ms()?)
@@ -332,41 +348,47 @@ async fn send_device_request(
     }
     let now = now_ms()?;
     let mut conn = get_db_conn!(pool);
-    let sessions = crate::database::account_session::list_active(
-        &mut conn,
-        &account.id,
-        account.session_generation,
-        now,
-    )
-    .await
-    .map_err(|_| HandlerError::InternalDatabaseError)?;
-    if !sessions
-        .iter()
-        .any(|target| target.device_id == form.recipient)
-    {
-        return Err(HandlerError::AccountSessionNotFound);
-    }
     conn.transaction::<_, diesel::result::Error, _>(|conn| {
         Box::pin(async {
-            // Serialize bounded queue updates across workers.
+            // Serialize recipient validation and queue updates with session revocation.
             use diesel::prelude::*;
             use diesel_async::RunQueryDsl;
-            diesel::update(crate::schema::account::table.find(&account.id))
+            let locked =
+                diesel::update(crate::schema::account::table.find(&account.id).filter(
+                    crate::schema::account::session_generation.eq(account.session_generation),
+                ))
                 .set(crate::schema::account::id.eq(&account.id))
                 .execute(conn)
                 .await?;
+            if locked != 1 {
+                return Err(diesel::result::Error::NotFound);
+            }
+            let sessions = crate::database::account_session::list_active(
+                conn,
+                &account.id,
+                account.session_generation,
+                now_ms().map_err(|_| diesel::result::Error::RollbackTransaction)?,
+            )
+            .await?;
+            if !sessions
+                .iter()
+                .any(|target| target.device_id == form.recipient)
+            {
+                return Err(diesel::result::Error::NotFound);
+            }
             sync_event::append(conn, &account.id, &form.recipient, &form.payload, now).await
         })
     })
     .await
     .map_err(|error| match error {
+        diesel::result::Error::NotFound => HandlerError::AccountSessionNotFound,
         diesel::result::Error::DatabaseError(
             diesel::result::DatabaseErrorKind::CheckViolation,
             _,
         ) => HandlerError::EncryptedSyncQuotaExceeded,
         _ => HandlerError::InternalDatabaseError,
     })?;
-    notify(&account.id);
+    notify(&account.id, Some(&form.recipient));
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -382,7 +404,7 @@ async fn acknowledge_device_request(
     sync_event::acknowledge(&mut conn, &account.id, &session.device_id, &event)
         .await
         .map_err(|_| HandlerError::InternalDatabaseError)?;
-    notify(&account.id);
+    notify(&account.id, Some(&session.device_id));
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -453,6 +475,15 @@ mod migration_tests {
             ),
         )
         .await;
+        let request = test::TestRequest::put()
+            .uri("/sync/settings")
+            .set_json(serde_json::json!({"revision": 0, "payload": "ciphertext", "activity": ""}))
+            .to_request();
+        request.extensions_mut().insert(account.clone());
+        assert_eq!(
+            test::call_service(&app, request).await.status().as_u16(),
+            400
+        );
         for (revision, payload, activity) in [
             (0, "old-client-first", None),
             (1, "new-client", Some("encrypted-activity")),
@@ -796,6 +827,45 @@ mod live_tests {
         )
         .await;
         assert_eq!(response.status().as_u16(), 204);
+        let messages: serde_json::Value = test::call_and_read_body_json(
+            &app,
+            request(
+                test::TestRequest::get().uri("/sync/events"),
+                &account,
+                &recipient,
+            ),
+        )
+        .await;
+        assert!(messages.as_array().unwrap().is_empty());
+
+        // Simulate a revocation becoming visible as the send acquires its account lock.
+        // Validation before that lock incorrectly accepts the now-revoked recipient.
+        pool.get()
+            .await
+            .unwrap()
+            .spawn_blocking(|conn| {
+                conn.batch_execute(
+                    "CREATE TRIGGER revoke_recipient_on_lock BEFORE UPDATE ON account
+                WHEN NEW.id = 'owner' BEGIN
+                UPDATE account_session SET revoked_at = 1 WHERE id = 'recipient-session';
+                END;",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let response = test::call_service(
+            &app,
+            request(
+                test::TestRequest::post().uri("/sync/events").set_json(
+                    serde_json::json!({"recipient": "recipient", "payload": "must not be queued"}),
+                ),
+                &account,
+                &sender,
+            ),
+        )
+        .await;
+        assert_eq!(response.status().as_u16(), 404);
         let messages: serde_json::Value = test::call_and_read_body_json(
             &app,
             request(

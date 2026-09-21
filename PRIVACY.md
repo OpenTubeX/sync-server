@@ -46,7 +46,8 @@ The server cannot recover a lost privacy passphrase.
 activity records and requests to open a video on another device. The server
 stores each encrypted payload with an event ID, account ID, recipient device ID
 for device requests, and creation and expiry times. Setting names and values,
-device display names, and requested video details remain encrypted.
+device display names included in these event payloads, and requested video
+details remain encrypted.
 
 **Device pairing.** Secure device pairing temporarily stores a one-time session
 ID, SHA-256 recipient-token hash, recipient public key, device identifiers, the
