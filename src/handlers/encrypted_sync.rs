@@ -90,6 +90,7 @@ fn collection_limit(collection: &str) -> HandlerResult<usize> {
         // Deprecated compatibility collection. Saved channel preferences now
         // belong in `settings`; keep accepting this while old clients remain.
         "sessions" | "sessionsV2" | "profiles" | "playbackSpeeds" => Ok(8 * MEBIBYTE),
+        // Per-device watch time totals are merged by clients.
         "watchStats" => Ok(8 * MEBIBYTE),
         "subscriptions" | "playlistBookmarks" | "seenVideos" | "seenPosts" => Ok(16 * MEBIBYTE),
         "playlists" | "history" => Ok(MAX_ENCRYPTED_SYNC_BYTES),
