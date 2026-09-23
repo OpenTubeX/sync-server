@@ -79,6 +79,7 @@ pub(crate) fn sync_capabilities() -> SyncCapabilities {
         account_sessions: 1,
         seen_videos: 1,
         seen_posts: 1,
+        watch_stats: 1,
         live_sync: 1,
     }
 }
@@ -89,6 +90,8 @@ fn collection_limit(collection: &str) -> HandlerResult<usize> {
         // Deprecated compatibility collection. Saved channel preferences now
         // belong in `settings`; keep accepting this while old clients remain.
         "sessions" | "sessionsV2" | "profiles" | "playbackSpeeds" => Ok(8 * MEBIBYTE),
+        // Per-device watch time totals are merged by clients.
+        "watchStats" => Ok(8 * MEBIBYTE),
         "subscriptions" | "playlistBookmarks" | "seenVideos" | "seenPosts" => Ok(16 * MEBIBYTE),
         "playlists" | "history" => Ok(MAX_ENCRYPTED_SYNC_BYTES),
         _ => Err(HandlerError::ValidationErrorWithContext(
@@ -430,6 +433,8 @@ mod tests {
         assert_eq!(collection_limit("subscriptions").unwrap(), 16 * MEBIBYTE);
         assert_eq!(collection_limit("history").unwrap(), 64 * MEBIBYTE);
         assert_eq!(collection_limit("seenVideos").unwrap(), 16 * MEBIBYTE);
+        assert_eq!(collection_limit("watchStats").unwrap(), 8 * MEBIBYTE);
+        assert_eq!(super::sync_capabilities().watch_stats, 1);
         assert_eq!(super::sync_capabilities().seen_videos, 1);
         assert!(collection_limit("unknown").is_err());
     }
