@@ -89,9 +89,8 @@ fn collection_limit(collection: &str) -> HandlerResult<usize> {
         "settings" => Ok(2 * MEBIBYTE),
         // Deprecated compatibility collection. Saved channel preferences now
         // belong in `settings`; keep accepting this while old clients remain.
-        "sessions" | "sessionsV2" | "profiles" | "playbackSpeeds" | "watchStats" => {
-            Ok(8 * MEBIBYTE)
-        }
+        "sessions" | "sessionsV2" | "profiles" | "playbackSpeeds" => Ok(8 * MEBIBYTE),
+        "watchStats" => Ok(8 * MEBIBYTE),
         "subscriptions" | "playlistBookmarks" | "seenVideos" | "seenPosts" => Ok(16 * MEBIBYTE),
         "playlists" | "history" => Ok(MAX_ENCRYPTED_SYNC_BYTES),
         _ => Err(HandlerError::ValidationErrorWithContext(
