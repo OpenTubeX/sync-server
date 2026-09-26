@@ -34,6 +34,7 @@ pub struct SyncCapabilities {
     pub seen_videos: u8,
     pub seen_posts: u8,
     pub watch_stats: u8,
+    pub live_reminders: u8,
     pub live_sync: u8,
 }
 
