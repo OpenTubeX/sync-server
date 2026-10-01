@@ -23,10 +23,10 @@ use utoipa_scalar::{Scalar, Servable};
 
 use crate::{
     handlers::{
-        ScopedHandler, channel_playback_speeds::ChannelPlaybackSpeedsHandler,
-        encrypted_sync::EncryptedSyncHandler, health::HealthHandler, pairing::PairingHandler,
-        playlist_bookmarks::PlaylistBookmarksHandler, playlists::PlaylistsHandler,
-        subscriptions::SubscriptionsHandler, user::UserHandler, watch_history::WatchHistoryHandler,
+        ScopedHandler, encrypted_sync::EncryptedSyncHandler, health::HealthHandler,
+        pairing::PairingHandler, playlist_bookmarks::PlaylistBookmarksHandler,
+        playlists::PlaylistsHandler, subscriptions::SubscriptionsHandler, user::UserHandler,
+        watch_history::WatchHistoryHandler,
     },
     oidc::init_oidc,
     openapi::ApiDoc,
@@ -130,7 +130,6 @@ async fn main() -> io::Result<()> {
 fn configure_v1_routes(config: &mut ServiceConfig<'_>) {
     config
         .service(UserHandler::get_service())
-        .service(ChannelPlaybackSpeedsHandler::get_service())
         .service(SubscriptionsHandler::get_service())
         .service(PlaylistsHandler::get_service())
         .service(PlaylistBookmarksHandler::get_service())
@@ -339,6 +338,85 @@ mod tests {
         assert!(require_migration_approval(true, &pending, None).is_err());
         assert!(require_migration_approval(true, &pending, Some("20260721")).is_err());
         assert!(require_migration_approval(true, &pending, Some("20260721,20260722")).is_ok());
+    }
+
+    #[cfg(feature = "sqlite")]
+    fn database_before_playback_speed_retirement() -> diesel::SqliteConnection {
+        use diesel::Connection;
+        use diesel::connection::SimpleConnection;
+        use diesel_migrations::MigrationHarness;
+
+        let mut conn = diesel::SqliteConnection::establish(":memory:").unwrap();
+        conn.batch_execute("PRAGMA foreign_keys = ON;").unwrap();
+        let migrations = conn.pending_migrations(super::MIGRATIONS).unwrap();
+        let retirement = migrations
+            .iter()
+            .position(|migration| migration.name().version().to_string() == "202610010000000000")
+            .expect("playback-speed retirement migration must be embedded");
+        conn.run_migrations(&migrations[..retirement]).unwrap();
+        conn.batch_execute(
+            "INSERT INTO account (id, name_hash) VALUES ('owner', 'owner-hash');
+             INSERT INTO encrypted_sync (account_id, collection, revision, payload)
+               VALUES ('owner', 'settings', 1, 'settings-ciphertext'),
+                      ('owner', 'playbackSpeeds', 1, 'speeds-ciphertext');
+             INSERT INTO encrypted_sync_single_document (account_id, revision, payload)
+               VALUES ('owner', 1, 'legacy-ciphertext');",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn playback_speed_retirement_preserves_encrypted_data_and_can_be_reverted() {
+        use diesel::RunQueryDsl;
+        use diesel_migrations::MigrationHarness;
+
+        let mut conn = database_before_playback_speed_retirement();
+        conn.run_pending_migrations(super::MIGRATIONS).unwrap();
+        assert_eq!(
+            diesel::sql_query(
+                "SELECT COUNT(*) AS count FROM sqlite_master WHERE name = 'channel_playback_speed'"
+            )
+            .get_result::<RowCount>(&mut conn)
+            .unwrap()
+            .count,
+            0
+        );
+        assert_eq!(table_count(&mut conn, "encrypted_sync"), 2);
+        assert_eq!(table_count(&mut conn, "encrypted_sync_single_document"), 1);
+        conn.revert_last_migration(super::MIGRATIONS).unwrap();
+        assert_eq!(table_count(&mut conn, "channel_playback_speed"), 0);
+        assert_eq!(table_count(&mut conn, "encrypted_sync"), 2);
+        assert_eq!(table_count(&mut conn, "encrypted_sync_single_document"), 1);
+        assert!(foreign_keys_enabled(&mut conn));
+        assert_eq!(table_count(&mut conn, "pragma_foreign_key_check"), 0);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn playback_speed_retirement_refuses_to_delete_unmigrated_plaintext_rows() {
+        use diesel::connection::SimpleConnection;
+        use diesel_migrations::MigrationHarness;
+
+        let mut conn = database_before_playback_speed_retirement();
+        conn.batch_execute(
+            "INSERT INTO channel_playback_speed (account_id, channel_id, playback_speed)
+               VALUES ('owner', 'channel-id', 1.5);",
+        )
+        .unwrap();
+        let error = conn.run_pending_migrations(super::MIGRATIONS).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("plaintext_playback_speeds_must_be_migrated")
+        );
+        assert_eq!(table_count(&mut conn, "channel_playback_speed"), 1);
+        assert_eq!(table_count(&mut conn, "encrypted_sync"), 2);
+        assert_eq!(table_count(&mut conn, "encrypted_sync_single_document"), 1);
+        conn.batch_execute("DELETE FROM channel_playback_speed;")
+            .unwrap();
+        conn.run_pending_migrations(super::MIGRATIONS).unwrap();
     }
 
     #[cfg(feature = "sqlite")]

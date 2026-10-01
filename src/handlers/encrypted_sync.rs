@@ -88,8 +88,7 @@ pub(crate) fn sync_capabilities() -> SyncCapabilities {
 fn collection_limit(collection: &str) -> HandlerResult<usize> {
     match collection {
         "settings" => Ok(2 * MEBIBYTE),
-        // Deprecated compatibility collection. Saved channel preferences now
-        // belong in `settings`; keep accepting this while old clients remain.
+        // `playbackSpeeds` remains readable for migration into `settings`.
         "sessions" | "sessionsV2" | "profiles" | "playbackSpeeds" => Ok(8 * MEBIBYTE),
         // Per-device watch time totals are merged by clients.
         "watchStats" | "liveReminders" => Ok(8 * MEBIBYTE),
@@ -201,6 +200,11 @@ async fn put_encrypted_sync_collection(
     form: web::Json<PutEncryptedSync>,
 ) -> HandlerResult<impl Responder> {
     let collection = collection.into_inner();
+    if collection == "playbackSpeeds" {
+        return Ok(HttpResponse::MethodNotAllowed()
+            .insert_header((actix_web::http::header::ALLOW, "GET"))
+            .body("playbackSpeeds is read-only; save channel playback speeds in settings"));
+    }
     if form.payload.len() > collection_limit(&collection)? {
         return Err(HandlerError::EncryptedSyncTooLarge);
     }
@@ -606,7 +610,8 @@ mod migration_tests {
         let manifest: serde_json::Value = test::call_and_read_body_json(&app, request).await;
         assert_eq!(manifest["legacy_encrypted_data"], true);
 
-        // Use the actual PUT endpoint, including deprecated collection support.
+        // Current collections can be uploaded, but settings alone cannot prove
+        // that the user included playback speeds in the migration.
         for collection in [
             "subscriptions",
             "playlists",
@@ -614,7 +619,6 @@ mod migration_tests {
             "profiles",
             "playlistBookmarks",
             "settings",
-            "playbackSpeeds",
         ] {
             let request = test::TestRequest::put()
                 .uri(&format!("/sync/{collection}"))
@@ -632,11 +636,20 @@ mod migration_tests {
             let request = test::TestRequest::get().uri("/sync").to_request();
             request.extensions_mut().insert(account.clone());
             let manifest: serde_json::Value = test::call_and_read_body_json(&app, request).await;
-            assert_eq!(
-                manifest["legacy_encrypted_data"],
-                collection != "playbackSpeeds"
-            );
+            assert_eq!(manifest["legacy_encrypted_data"], true);
         }
+        // A collection saved before it became read-only is still readable.
+        crate::database::encrypted_sync::create(
+            &mut pool.get().await.unwrap(),
+            &crate::models::EncryptedSync {
+                account_id: account.id.clone(),
+                collection: "playbackSpeeds".into(),
+                revision: 1,
+                payload: "legacy-speeds-ciphertext".into(),
+            },
+        )
+        .await
+        .unwrap();
         for deleted in [false, true] {
             if deleted {
                 let mut conn = pool.get().await.unwrap();

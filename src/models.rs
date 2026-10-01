@@ -97,28 +97,6 @@ pub struct Subscription {
     pub channel_id: String,
 }
 
-#[derive(
-    Debug,
-    Clone,
-    Serialize,
-    Deserialize,
-    Queryable,
-    Selectable,
-    Insertable,
-    AsChangeset,
-    ToSchema,
-    PartialEq,
-)]
-#[diesel(primary_key(account_id, channel_id))]
-#[diesel(belongs_to(Account))]
-#[diesel(table_name = channel_playback_speed)]
-pub struct ChannelPlaybackSpeed {
-    #[serde(skip)]
-    pub account_id: String,
-    pub channel_id: String,
-    pub playback_speed: f64,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Queryable, Selectable, Insertable, ToSchema)]
 #[diesel(primary_key(account_id, collection))]
 #[diesel(belongs_to(Account))]
