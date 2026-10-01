@@ -1,5 +1,5 @@
 use actix_web::{HttpResponse, Responder, delete, get, middleware::from_fn, patch, put, web};
-use diesel_async::{AsyncConnection, scoped_futures::ScopedFutureExt};
+use diesel_async::AsyncConnection;
 use serde::Deserialize;
 use utoipa_actix_web::scope;
 
@@ -133,23 +133,20 @@ async fn persist_watch_history_items(
     account_id: &str,
     items: &[ExtendedWatchHistoryItem],
 ) -> HandlerResult<()> {
-    conn.transaction::<_, HandlerError, _>(|conn| {
-        async move {
-            for item in items {
-                persist_watch_history_item(conn, item).await?;
-            }
-
-            // Authoritative check on the rows that now exist. History entries are
-            // upserts, so counting afterwards is the only way to charge for what
-            // was actually added; an error here rolls the batch back.
-            check_stored_rows(
-                count_watch_history(conn, account_id)
-                    .await
-                    .map_err(|_| HandlerError::InternalDatabaseError)?,
-            )?;
-            Ok(())
+    conn.transaction::<_, HandlerError, _>(async |conn| {
+        for item in items {
+            persist_watch_history_item(conn, item).await?;
         }
-        .scope_boxed()
+
+        // Authoritative check on the rows that now exist. History entries are
+        // upserts, so counting afterwards is the only way to charge for what
+        // was actually added; an error here rolls the batch back.
+        check_stored_rows(
+            count_watch_history(conn, account_id)
+                .await
+                .map_err(|_| HandlerError::InternalDatabaseError)?,
+        )?;
+        Ok(())
     })
     .await
 }

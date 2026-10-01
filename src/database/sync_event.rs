@@ -268,20 +268,18 @@ mod tests {
         );
         // Rolling back the enclosing transaction also rolls back its activity.
         let result: Result<(), diesel::result::Error> = conn
-            .transaction(move |conn| {
-                Box::pin(async move {
-                    save(
-                        conn,
-                        "b",
-                        "settings",
-                        0,
-                        "settings",
-                        1000000,
-                        Some(("rollback", now)),
-                    )
-                    .await?;
-                    Err(diesel::result::Error::RollbackTransaction)
-                })
+            .transaction(async |conn| {
+                save(
+                    conn,
+                    "b",
+                    "settings",
+                    0,
+                    "settings",
+                    1000000,
+                    Some(("rollback", now)),
+                )
+                .await?;
+                Err(diesel::result::Error::RollbackTransaction)
             })
             .await;
         assert!(result.is_err());

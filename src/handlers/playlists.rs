@@ -1,5 +1,5 @@
 use actix_web::{HttpResponse, Responder, delete, get, middleware::from_fn, patch, post, web};
-use diesel_async::{AsyncConnection, scoped_futures::ScopedFutureExt};
+use diesel_async::AsyncConnection;
 use itertools::Itertools;
 use utoipa_actix_web::scope;
 
@@ -241,39 +241,36 @@ async fn add_to_playlist(
     }
 
     let mut conn = get_db_conn!(pool);
-    conn.transaction::<_, HandlerError, _>(|conn| {
+    conn.transaction::<_, HandlerError, _>(async |conn| {
         let (groups, playlist_id, account_id) = (&groups, &*playlist_id, &account.id);
-        async move {
-            // Re-check ownership: the earlier check happened before the RSS
-            // round-trips, which can take seconds, so the playlist may have been
-            // deleted since. Without this the inserts fail as an opaque database
-            // error instead of PlaylistNotExists.
-            get_owned_playlist_or_error(conn, playlist_id, account_id).await?;
+        // Re-check ownership: the earlier check happened before the RSS
+        // round-trips, which can take seconds, so the playlist may have been
+        // deleted since. Without this the inserts fail as an opaque database
+        // error instead of PlaylistNotExists.
+        get_owned_playlist_or_error(conn, playlist_id, account_id).await?;
 
-            for (channel, videos) in groups {
-                // store channel information first before storing video to ensure data integrity
-                create_or_update_channel(conn, channel)
+        for (channel, videos) in groups {
+            // store channel information first before storing video to ensure data integrity
+            create_or_update_channel(conn, channel)
+                .await
+                .map_err(|_| HandlerError::InternalDatabaseError)?;
+
+            for video in videos {
+                add_video_to_playlist(conn, playlist_id, account_id, &video.into())
                     .await
                     .map_err(|_| HandlerError::InternalDatabaseError)?;
-
-                for video in videos {
-                    add_video_to_playlist(conn, playlist_id, account_id, &video.into())
-                        .await
-                        .map_err(|_| HandlerError::InternalDatabaseError)?;
-                }
             }
-
-            // Authoritative check on the rows that now exist. Playlist members are
-            // upserts, so counting afterwards is the only way to charge for what
-            // was actually added; an error here rolls the batch back.
-            check_stored_rows(
-                count_playlist_videos(conn, account_id)
-                    .await
-                    .map_err(|_| HandlerError::InternalDatabaseError)?,
-            )?;
-            Ok(())
         }
-        .scope_boxed()
+
+        // Authoritative check on the rows that now exist. Playlist members are
+        // upserts, so counting afterwards is the only way to charge for what
+        // was actually added; an error here rolls the batch back.
+        check_stored_rows(
+            count_playlist_videos(conn, account_id)
+                .await
+                .map_err(|_| HandlerError::InternalDatabaseError)?,
+        )?;
+        Ok(())
     })
     .await?;
 

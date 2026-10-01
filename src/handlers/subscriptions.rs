@@ -1,5 +1,5 @@
 use actix_web::{HttpResponse, Responder, delete, get, middleware::from_fn, patch, post, put, web};
-use diesel_async::{AsyncConnection, scoped_futures::ScopedFutureExt};
+use diesel_async::AsyncConnection;
 use utoipa_actix_web::scope;
 
 use crate::{
@@ -97,23 +97,20 @@ async fn subscribe_bulk(
     }
 
     let mut conn = get_db_conn!(pool);
-    conn.transaction::<_, HandlerError, _>(|conn| {
-        async move {
-            for channel in &channels {
-                add_subscription_by_account_id(conn, channel, &account.id).await?;
-            }
-
-            // Authoritative check on the rows that now exist. Subscriptions are
-            // upserts, so counting afterwards is the only way to charge for what
-            // was actually added; an error here rolls the batch back.
-            check_stored_rows(
-                count_subscriptions(conn, &account.id)
-                    .await
-                    .map_err(|_| HandlerError::InternalDatabaseError)?,
-            )?;
-            Ok(())
+    conn.transaction::<_, HandlerError, _>(async |conn| {
+        for channel in &channels {
+            add_subscription_by_account_id(conn, channel, &account.id).await?;
         }
-        .scope_boxed()
+
+        // Authoritative check on the rows that now exist. Subscriptions are
+        // upserts, so counting afterwards is the only way to charge for what
+        // was actually added; an error here rolls the batch back.
+        check_stored_rows(
+            count_subscriptions(conn, &account.id)
+                .await
+                .map_err(|_| HandlerError::InternalDatabaseError)?,
+        )?;
+        Ok(())
     })
     .await?;
 
@@ -170,18 +167,15 @@ async fn subscribe(
     // Mirrors the bulk path: without an authoritative post-write check inside a
     // transaction, concurrent single subscribes each see an under-quota count and
     // can together push the account past the limit.
-    conn.transaction::<_, HandlerError, _>(|conn| {
+    conn.transaction::<_, HandlerError, _>(async |conn| {
         let (channel, account_id) = (&channel, &account.id);
-        async move {
-            add_subscription_by_account_id(conn, channel, account_id).await?;
-            check_stored_rows(
-                count_subscriptions(conn, account_id)
-                    .await
-                    .map_err(|_| HandlerError::InternalDatabaseError)?,
-            )?;
-            Ok(())
-        }
-        .scope_boxed()
+        add_subscription_by_account_id(conn, channel, account_id).await?;
+        check_stored_rows(
+            count_subscriptions(conn, account_id)
+                .await
+                .map_err(|_| HandlerError::InternalDatabaseError)?,
+        )?;
+        Ok(())
     })
     .await?;
 

@@ -24,25 +24,23 @@ pub async fn get_or_create(
     conn: &mut DbConnection,
     session: &AccountSession,
 ) -> Result<AccountSession, DbError> {
-    conn.transaction(|conn| {
-        Box::pin(async move {
-            diesel::insert_into(account_session)
-                .values(session)
-                .on_conflict(id)
-                .do_nothing()
-                .execute(conn)
-                .await?;
+    conn.transaction(async |conn| {
+        diesel::insert_into(account_session)
+            .values(session)
+            .on_conflict(id)
+            .do_nothing()
+            .execute(conn)
+            .await?;
 
-            account_session
-                .filter(id.eq(&session.id))
-                .filter(account_id.eq(&session.account_id))
-                .filter(generation.eq(session.generation))
-                .filter(expires_at.gt(session.created_at))
-                .filter(revoked_at.is_null())
-                .select(AccountSession::as_select())
-                .first(conn)
-                .await
-        })
+        account_session
+            .filter(id.eq(&session.id))
+            .filter(account_id.eq(&session.account_id))
+            .filter(generation.eq(session.generation))
+            .filter(expires_at.gt(session.created_at))
+            .filter(revoked_at.is_null())
+            .select(AccountSession::as_select())
+            .first(conn)
+            .await
     })
     .await
 }
@@ -149,33 +147,31 @@ pub async fn revoke(
     current_generation: i64,
     now: i64,
 ) -> Result<bool, DbError> {
-    conn.transaction(|conn| {
-        Box::pin(async move {
-            // Device request sends take this same lock before validating recipients.
-            let locked = diesel::update(
-                schema::account::table
-                    .find(owner_id)
-                    .filter(schema::account::session_generation.eq(current_generation)),
-            )
-            .set(schema::account::id.eq(owner_id))
-            .execute(conn)
-            .await?;
-            if locked != 1 {
-                return Ok(false);
-            }
-            diesel::update(
-                account_session
-                    .filter(id.eq(session_id))
-                    .filter(account_id.eq(owner_id))
-                    .filter(generation.eq(current_generation))
-                    .filter(pending_pairing.eq(false))
-                    .filter(revoked_at.is_null()),
-            )
-            .set(revoked_at.eq(now))
-            .execute(conn)
-            .await
-            .map(|updated| updated == 1)
-        })
+    conn.transaction(async |conn| {
+        // Device request sends take this same lock before validating recipients.
+        let locked = diesel::update(
+            schema::account::table
+                .find(owner_id)
+                .filter(schema::account::session_generation.eq(current_generation)),
+        )
+        .set(schema::account::id.eq(owner_id))
+        .execute(conn)
+        .await?;
+        if locked != 1 {
+            return Ok(false);
+        }
+        diesel::update(
+            account_session
+                .filter(id.eq(session_id))
+                .filter(account_id.eq(owner_id))
+                .filter(generation.eq(current_generation))
+                .filter(pending_pairing.eq(false))
+                .filter(revoked_at.is_null()),
+        )
+        .set(revoked_at.eq(now))
+        .execute(conn)
+        .await
+        .map(|updated| updated == 1)
     })
     .await
 }
@@ -188,42 +184,40 @@ pub async fn change_password_and_revoke_others(
     new_password_hash: &str,
     now: i64,
 ) -> Result<bool, DbError> {
-    conn.transaction(|conn| {
-        Box::pin(async move {
-            let updated = diesel::update(
-                schema::account::table
-                    .filter(schema::account::id.eq(owner_id))
-                    .filter(schema::account::password_hash.eq(Some(expected_password_hash)))
-                    .filter(
-                        schema::account::session_generation
-                            .eq(replacement.generation.saturating_sub(1)),
-                    ),
-            )
-            .set((
-                schema::account::password_hash.eq(Some(new_password_hash)),
-                schema::account::legacy_tokens_enabled.eq(false),
-                schema::account::session_generation.eq(replacement.generation),
-            ))
+    conn.transaction(async |conn| {
+        let updated = diesel::update(
+            schema::account::table
+                .filter(schema::account::id.eq(owner_id))
+                .filter(schema::account::password_hash.eq(Some(expected_password_hash)))
+                .filter(
+                    schema::account::session_generation
+                        .eq(replacement.generation.saturating_sub(1)),
+                ),
+        )
+        .set((
+            schema::account::password_hash.eq(Some(new_password_hash)),
+            schema::account::legacy_tokens_enabled.eq(false),
+            schema::account::session_generation.eq(replacement.generation),
+        ))
+        .execute(conn)
+        .await?;
+        if updated != 1 {
+            return Ok(false);
+        }
+        diesel::insert_into(account_session)
+            .values(replacement)
             .execute(conn)
             .await?;
-            if updated != 1 {
-                return Ok(false);
-            }
-            diesel::insert_into(account_session)
-                .values(replacement)
-                .execute(conn)
-                .await?;
-            diesel::update(
-                account_session
-                    .filter(account_id.eq(owner_id))
-                    .filter(id.ne(&replacement.id))
-                    .filter(revoked_at.is_null()),
-            )
-            .set(revoked_at.eq(now))
-            .execute(conn)
-            .await?;
-            Ok(true)
-        })
+        diesel::update(
+            account_session
+                .filter(account_id.eq(owner_id))
+                .filter(id.ne(&replacement.id))
+                .filter(revoked_at.is_null()),
+        )
+        .set(revoked_at.eq(now))
+        .execute(conn)
+        .await?;
+        Ok(true)
     })
     .await
 }
