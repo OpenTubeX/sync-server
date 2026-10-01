@@ -31,27 +31,25 @@ pub enum ClaimResult {
 }
 
 pub async fn delete_expired(conn: &mut DbConnection, now: i64) -> Result<usize, DbError> {
-    conn.transaction(|conn| {
-        Box::pin(async move {
-            let expired_ids = pairing_session
-                .filter(expires_at.le(now))
-                .select(id)
-                .load::<String>(conn)
-                .await?;
-            if expired_ids.is_empty() {
-                return Ok(0);
-            }
-            diesel::delete(
-                crate::schema::account_session::table
-                    .filter(crate::schema::account_session::id.eq_any(&expired_ids))
-                    .filter(crate::schema::account_session::pending_pairing.eq(true)),
-            )
-            .execute(conn)
+    conn.transaction(async |conn| {
+        let expired_ids = pairing_session
+            .filter(expires_at.le(now))
+            .select(id)
+            .load::<String>(conn)
             .await?;
-            diesel::delete(pairing_session.filter(id.eq_any(expired_ids)))
-                .execute(conn)
-                .await
-        })
+        if expired_ids.is_empty() {
+            return Ok(0);
+        }
+        diesel::delete(
+            crate::schema::account_session::table
+                .filter(crate::schema::account_session::id.eq_any(&expired_ids))
+                .filter(crate::schema::account_session::pending_pairing.eq(true)),
+        )
+        .execute(conn)
+        .await?;
+        diesel::delete(pairing_session.filter(id.eq_any(expired_ids)))
+            .execute(conn)
+            .await
     })
     .await
 }
@@ -61,28 +59,26 @@ pub async fn create(
     session: &PairingSession,
     now: i64,
 ) -> Result<CreateResult, DbError> {
-    conn.transaction(|conn| {
-        Box::pin(async move {
-            delete_expired(conn, now).await?;
+    conn.transaction(async |conn| {
+        delete_expired(conn, now).await?;
 
-            let active = pairing_session.count().get_result::<i64>(conn).await?;
-            if active >= MAX_ACTIVE_SESSIONS {
-                return Ok(CreateResult::LimitExceeded);
-            }
+        let active = pairing_session.count().get_result::<i64>(conn).await?;
+        if active >= MAX_ACTIVE_SESSIONS {
+            return Ok(CreateResult::LimitExceeded);
+        }
 
-            match diesel::insert_into(pairing_session)
-                .values(session)
-                .execute(conn)
-                .await
-            {
-                Ok(_) => Ok(CreateResult::Created),
-                Err(diesel::result::Error::DatabaseError(
-                    diesel::result::DatabaseErrorKind::UniqueViolation,
-                    _,
-                )) => Ok(CreateResult::Duplicate),
-                Err(error) => Err(error),
-            }
-        })
+        match diesel::insert_into(pairing_session)
+            .values(session)
+            .execute(conn)
+            .await
+        {
+            Ok(_) => Ok(CreateResult::Created),
+            Err(diesel::result::Error::DatabaseError(
+                diesel::result::DatabaseErrorKind::UniqueViolation,
+                _,
+            )) => Ok(CreateResult::Duplicate),
+            Err(error) => Err(error),
+        }
     })
     .await
 }
@@ -94,82 +90,80 @@ pub async fn claim(
     candidate_session: &AccountSession,
     now: i64,
 ) -> Result<ClaimResult, DbError> {
-    conn.transaction(|conn| {
-        Box::pin(async move {
-            use crate::schema::account;
+    conn.transaction(async |conn| {
+        use crate::schema::account;
 
-            // Serialize the per-account limit across workers and replicas.
-            let account_locked = diesel::update(
-                account::table
-                    .filter(account::id.eq(owner_id))
-                    .filter(account::session_generation.eq(candidate_session.generation)),
-            )
-            .set(account::id.eq(account::id))
-            .execute(conn)
+        // Serialize the per-account limit across workers and replicas.
+        let account_locked = diesel::update(
+            account::table
+                .filter(account::id.eq(owner_id))
+                .filter(account::session_generation.eq(candidate_session.generation)),
+        )
+        .set(account::id.eq(account::id))
+        .execute(conn)
+        .await?;
+        if account_locked != 1 {
+            return Ok(ClaimResult::Conflict);
+        }
+        delete_expired(conn, now).await?;
+
+        let existing = pairing_session
+            .filter(id.eq(&request.id))
+            .filter(version.eq(request.version))
+            .filter(account_id.eq(owner_id))
+            .filter(recipient_public_key.eq(&request.recipient_public_key))
+            .filter(recipient_device_id.eq(&request.recipient_device_id))
+            .filter(recipient_device_name.eq(&request.recipient_device_name))
+            .filter(expires_at.gt(now))
+            .filter(encrypted_payload.is_null())
+            .select(PairingSession::as_select())
+            .first(conn)
+            .await
+            .optional()?;
+        if let Some(session) = existing {
+            let account_session =
+                crate::database::account_session::get_or_create(conn, candidate_session)
+                    .await?;
+            return Ok(ClaimResult::Claimed {
+                pairing: Box::new(session),
+                account_session: Box::new(account_session),
+            });
+        }
+
+        let active = pairing_session
+            .filter(account_id.eq(owner_id))
+            .count()
+            .get_result::<i64>(conn)
             .await?;
-            if account_locked != 1 {
-                return Ok(ClaimResult::Conflict);
-            }
-            delete_expired(conn, now).await?;
+        if active >= MAX_ACTIVE_SESSIONS_PER_ACCOUNT {
+            return Ok(ClaimResult::LimitExceeded);
+        }
 
-            let existing = pairing_session
+        let claimed = diesel::update(
+            pairing_session
                 .filter(id.eq(&request.id))
                 .filter(version.eq(request.version))
-                .filter(account_id.eq(owner_id))
+                .filter(account_id.is_null())
                 .filter(recipient_public_key.eq(&request.recipient_public_key))
                 .filter(recipient_device_id.eq(&request.recipient_device_id))
                 .filter(recipient_device_name.eq(&request.recipient_device_name))
                 .filter(expires_at.gt(now))
-                .filter(encrypted_payload.is_null())
-                .select(PairingSession::as_select())
-                .first(conn)
-                .await
-                .optional()?;
-            if let Some(session) = existing {
-                let account_session =
-                    crate::database::account_session::get_or_create(conn, candidate_session)
-                        .await?;
-                return Ok(ClaimResult::Claimed {
-                    pairing: Box::new(session),
-                    account_session: Box::new(account_session),
-                });
-            }
+                .filter(encrypted_payload.is_null()),
+        )
+        .set(account_id.eq(owner_id))
+        .returning(PairingSession::as_returning())
+        .get_result(conn)
+        .await
+        .optional()?;
 
-            let active = pairing_session
-                .filter(account_id.eq(owner_id))
-                .count()
-                .get_result::<i64>(conn)
-                .await?;
-            if active >= MAX_ACTIVE_SESSIONS_PER_ACCOUNT {
-                return Ok(ClaimResult::LimitExceeded);
-            }
-
-            let claimed = diesel::update(
-                pairing_session
-                    .filter(id.eq(&request.id))
-                    .filter(version.eq(request.version))
-                    .filter(account_id.is_null())
-                    .filter(recipient_public_key.eq(&request.recipient_public_key))
-                    .filter(recipient_device_id.eq(&request.recipient_device_id))
-                    .filter(recipient_device_name.eq(&request.recipient_device_name))
-                    .filter(expires_at.gt(now))
-                    .filter(encrypted_payload.is_null()),
-            )
-            .set(account_id.eq(owner_id))
-            .returning(PairingSession::as_returning())
-            .get_result(conn)
-            .await
-            .optional()?;
-
-            let Some(pairing) = claimed else {
-                return Ok(ClaimResult::Conflict);
-            };
-            let account_session =
-                crate::database::account_session::get_or_create(conn, candidate_session).await?;
-            Ok(ClaimResult::Claimed {
-                pairing: Box::new(pairing),
-                account_session: Box::new(account_session),
-            })
+        let Some(pairing) = claimed else {
+            return Ok(ClaimResult::Conflict);
+        };
+        let account_session =
+            crate::database::account_session::get_or_create(conn, candidate_session).await?;
+        Ok(ClaimResult::Claimed {
+            pairing: Box::new(pairing),
+            account_session: Box::new(account_session),
         })
     })
     .await
@@ -238,36 +232,34 @@ pub async fn consume(
     token_hash: &str,
     now: i64,
 ) -> Result<Option<PairingSession>, DbError> {
-    conn.transaction(|conn| {
-        Box::pin(async move {
-            let consumed = diesel::delete(
-                pairing_session
-                    .filter(id.eq(session_id))
-                    .filter(version.eq(1))
-                    .filter(recipient_token_hash.eq(token_hash))
-                    .filter(expires_at.gt(now))
-                    .filter(encrypted_payload.is_not_null()),
-            )
-            .returning(PairingSession::as_returning())
-            .get_result(conn)
-            .await
-            .optional()?;
-            let Some(session) = consumed else {
-                return Ok(None);
-            };
-            let activated = diesel::update(
-                crate::schema::account_session::table
-                    .filter(crate::schema::account_session::id.eq(session_id))
-                    .filter(crate::schema::account_session::pending_pairing.eq(true)),
-            )
-            .set(crate::schema::account_session::pending_pairing.eq(false))
-            .execute(conn)
-            .await?;
-            if activated != 1 {
-                return Err(diesel::result::Error::NotFound);
-            }
-            Ok(Some(session))
-        })
+    conn.transaction(async |conn| {
+        let consumed = diesel::delete(
+            pairing_session
+                .filter(id.eq(session_id))
+                .filter(version.eq(1))
+                .filter(recipient_token_hash.eq(token_hash))
+                .filter(expires_at.gt(now))
+                .filter(encrypted_payload.is_not_null()),
+        )
+        .returning(PairingSession::as_returning())
+        .get_result(conn)
+        .await
+        .optional()?;
+        let Some(session) = consumed else {
+            return Ok(None);
+        };
+        let activated = diesel::update(
+            crate::schema::account_session::table
+                .filter(crate::schema::account_session::id.eq(session_id))
+                .filter(crate::schema::account_session::pending_pairing.eq(true)),
+        )
+        .set(crate::schema::account_session::pending_pairing.eq(false))
+        .execute(conn)
+        .await?;
+        if activated != 1 {
+            return Err(diesel::result::Error::NotFound);
+        }
+        Ok(Some(session))
     })
     .await
 }
@@ -277,28 +269,26 @@ pub async fn cancel(
     session_id: &str,
     token_hash: &str,
 ) -> Result<bool, DbError> {
-    conn.transaction(|conn| {
-        Box::pin(async move {
-            let deleted = diesel::delete(
-                pairing_session
-                    .filter(id.eq(session_id))
-                    .filter(version.eq(1))
-                    .filter(recipient_token_hash.eq(token_hash)),
-            )
-            .execute(conn)
-            .await?;
-            if deleted != 1 {
-                return Ok(false);
-            }
-            diesel::delete(
-                crate::schema::account_session::table
-                    .filter(crate::schema::account_session::id.eq(session_id))
-                    .filter(crate::schema::account_session::pending_pairing.eq(true)),
-            )
-            .execute(conn)
-            .await?;
-            Ok(true)
-        })
+    conn.transaction(async |conn| {
+        let deleted = diesel::delete(
+            pairing_session
+                .filter(id.eq(session_id))
+                .filter(version.eq(1))
+                .filter(recipient_token_hash.eq(token_hash)),
+        )
+        .execute(conn)
+        .await?;
+        if deleted != 1 {
+            return Ok(false);
+        }
+        diesel::delete(
+            crate::schema::account_session::table
+                .filter(crate::schema::account_session::id.eq(session_id))
+                .filter(crate::schema::account_session::pending_pairing.eq(true)),
+        )
+        .execute(conn)
+        .await?;
+        Ok(true)
     })
     .await
 }

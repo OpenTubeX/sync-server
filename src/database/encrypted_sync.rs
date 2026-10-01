@@ -146,7 +146,7 @@ pub async fn get_legacy_encrypted(
     owner_id: &str,
 ) -> Result<Option<LegacyEncryptedSync>, DbError> {
     diesel::sql_query(
-        "SELECT revision, payload FROM encrypted_sync_single_document WHERE account_id = ?",
+        "SELECT revision, payload FROM encrypted_sync_single_document WHERE account_id = $1",
     )
     .bind::<diesel::sql_types::Text, _>(owner_id)
     .get_result(conn)
@@ -183,68 +183,66 @@ pub async fn save(
     max_account_bytes: usize,
     activity: Option<(&str, i64)>,
 ) -> Result<SaveResult, DbError> {
-    conn.transaction(|conn| {
-        Box::pin(async move {
-            use crate::schema::account;
+    conn.transaction(async |conn| {
+        use crate::schema::account;
 
-            // Serialize quota checks for this account across processes and database backends.
-            diesel::update(account::table.filter(account::id.eq(owner_id)))
-                .set(account::id.eq(account::id))
-                .execute(conn)
-                .await?;
+        // Serialize quota checks for this account across processes and database backends.
+        diesel::update(account::table.filter(account::id.eq(owner_id)))
+            .set(account::id.eq(account::id))
+            .execute(conn)
+            .await?;
 
-            let existing = get_stored_collection(conn, owner_id, collection_name).await?;
-            if existing
-                .as_ref()
-                .map_or(expected_revision != 0, |document| {
-                    document.revision != expected_revision
-                })
-            {
-                return Ok(SaveResult::Conflict);
-            }
+        let existing = get_stored_collection(conn, owner_id, collection_name).await?;
+        if existing
+            .as_ref()
+            .map_or(expected_revision != 0, |document| {
+                document.revision != expected_revision
+            })
+        {
+            return Ok(SaveResult::Conflict);
+        }
 
-            let stored_bytes = get_stored_bytes(conn, owner_id).await?;
-            let previous_bytes = existing.as_ref().map_or(0, |document| document.bytes);
-            if exceeds_storage_quota(
-                stored_bytes,
-                previous_bytes,
-                new_payload.len(),
-                max_account_bytes,
-            ) {
-                return Ok(SaveResult::QuotaExceeded);
-            }
+        let stored_bytes = get_stored_bytes(conn, owner_id).await?;
+        let previous_bytes = existing.as_ref().map_or(0, |document| document.bytes);
+        if exceeds_storage_quota(
+            stored_bytes,
+            previous_bytes,
+            new_payload.len(),
+            max_account_bytes,
+        ) {
+            return Ok(SaveResult::QuotaExceeded);
+        }
 
-            if existing.is_some() {
-                diesel::update(
-                    encrypted_sync
-                        .filter(account_id.eq(owner_id))
-                        .filter(collection.eq(collection_name)),
-                )
-                .set((
-                    encrypted_revision.eq(expected_revision + 1),
-                    encrypted_payload.eq(new_payload),
-                ))
-                .execute(conn)
-                .await?;
-            } else {
-                create(
-                    conn,
-                    &EncryptedSync {
-                        account_id: owner_id.to_owned(),
-                        collection: collection_name.to_owned(),
-                        revision: 1,
-                        payload: new_payload.to_owned(),
-                    },
-                )
-                .await?;
-                clear_legacy_collection(conn, owner_id, collection_name).await?;
-            }
+        if existing.is_some() {
+            diesel::update(
+                encrypted_sync
+                    .filter(account_id.eq(owner_id))
+                    .filter(collection.eq(collection_name)),
+            )
+            .set((
+                encrypted_revision.eq(expected_revision + 1),
+                encrypted_payload.eq(new_payload),
+            ))
+            .execute(conn)
+            .await?;
+        } else {
+            create(
+                conn,
+                &EncryptedSync {
+                    account_id: owner_id.to_owned(),
+                    collection: collection_name.to_owned(),
+                    revision: 1,
+                    payload: new_payload.to_owned(),
+                },
+            )
+            .await?;
+            clear_legacy_collection(conn, owner_id, collection_name).await?;
+        }
 
-            if let Some((payload, now)) = activity {
-                crate::database::sync_event::append(conn, owner_id, "", payload, now).await?;
-            }
-            Ok(SaveResult::Saved)
-        })
+        if let Some((payload, now)) = activity {
+            crate::database::sync_event::append(conn, owner_id, "", payload, now).await?;
+        }
+        Ok(SaveResult::Saved)
     })
     .await
 }
@@ -359,6 +357,73 @@ pub async fn has_legacy_data(conn: &mut DbConnection, owner_id: &str) -> Result<
 #[cfg(test)]
 mod tests {
     use super::exceeds_storage_quota;
+
+    #[actix_rt::test]
+    #[cfg_attr(
+        feature = "postgres",
+        ignore = "requires TEST_DATABASE_URL pointing at a migrated PostgreSQL test database"
+    )]
+    async fn legacy_encrypted_lookup_returns_missing_and_stored_documents() {
+        use diesel_async::{AsyncConnection, RunQueryDsl};
+
+        use crate::{DbConnection, database::account, models::Account};
+
+        #[cfg(feature = "sqlite")]
+        let mut conn = {
+            use diesel_migrations::MigrationHarness;
+
+            let mut conn = DbConnection::establish(":memory:").await.unwrap();
+            conn.spawn_blocking(|conn| {
+                conn.run_pending_migrations(crate::MIGRATIONS).unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
+            conn
+        };
+        #[cfg(feature = "postgres")]
+        let mut conn = DbConnection::establish(
+            &std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be configured"),
+        )
+        .await
+        .unwrap();
+
+        let owner_id = uuid::Uuid::now_v7().to_string();
+        let result: Result<(), diesel::result::Error> = conn
+            .transaction(async |conn| {
+                assert!(super::get_legacy_encrypted(conn, &owner_id).await?.is_none());
+                account::insert_new_account(
+                    conn,
+                    &Account {
+                        id: owner_id.clone(),
+                        name_hash: owner_id.clone(),
+                        password_hash: None,
+                        oidc_sub: None,
+                        legacy_tokens_enabled: false,
+                        session_generation: 0,
+                    },
+                )
+                .await?;
+                diesel::sql_query(
+                    "INSERT INTO encrypted_sync_single_document (account_id, revision, payload) \
+                     VALUES ($1, 7, 'legacy-payload')",
+                )
+                .bind::<diesel::sql_types::Text, _>(&owner_id)
+                .execute(conn)
+                .await?;
+                let document = super::get_legacy_encrypted(conn, &owner_id)
+                    .await?
+                    .expect("the legacy document should be found");
+                assert_eq!(document.revision, 7);
+                assert_eq!(document.payload, "legacy-payload");
+                Err(diesel::result::Error::RollbackTransaction)
+            })
+            .await;
+        assert!(
+            matches!(result, Err(diesel::result::Error::RollbackTransaction)),
+            "unexpected lookup result: {result:?}"
+        );
+    }
 
     #[test]
     fn storage_quota_accounts_for_replaced_payload() {

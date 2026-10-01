@@ -357,36 +357,34 @@ async fn send_device_request(
     }
     let now = now_ms()?;
     let mut conn = get_db_conn!(pool);
-    conn.transaction::<_, diesel::result::Error, _>(|conn| {
-        Box::pin(async {
-            // Serialize recipient validation and queue updates with session revocation.
-            use diesel::prelude::*;
-            use diesel_async::RunQueryDsl;
-            let locked =
-                diesel::update(crate::schema::account::table.find(&account.id).filter(
-                    crate::schema::account::session_generation.eq(account.session_generation),
-                ))
-                .set(crate::schema::account::id.eq(&account.id))
-                .execute(conn)
-                .await?;
-            if locked != 1 {
-                return Err(diesel::result::Error::NotFound);
-            }
-            let sessions = crate::database::account_session::list_active(
-                conn,
-                &account.id,
-                account.session_generation,
-                now_ms().map_err(|_| diesel::result::Error::RollbackTransaction)?,
-            )
+    conn.transaction::<_, diesel::result::Error, _>(async |conn| {
+        // Serialize recipient validation and queue updates with session revocation.
+        use diesel::prelude::*;
+        use diesel_async::RunQueryDsl;
+        let locked =
+            diesel::update(crate::schema::account::table.find(&account.id).filter(
+                crate::schema::account::session_generation.eq(account.session_generation),
+            ))
+            .set(crate::schema::account::id.eq(&account.id))
+            .execute(conn)
             .await?;
-            if !sessions
-                .iter()
-                .any(|target| target.device_id == form.recipient)
-            {
-                return Err(diesel::result::Error::NotFound);
-            }
-            sync_event::append(conn, &account.id, &form.recipient, &form.payload, now).await
-        })
+        if locked != 1 {
+            return Err(diesel::result::Error::NotFound);
+        }
+        let sessions = crate::database::account_session::list_active(
+            conn,
+            &account.id,
+            account.session_generation,
+            now_ms().map_err(|_| diesel::result::Error::RollbackTransaction)?,
+        )
+        .await?;
+        if !sessions
+            .iter()
+            .any(|target| target.device_id == form.recipient)
+        {
+            return Err(diesel::result::Error::NotFound);
+        }
+        sync_event::append(conn, &account.id, &form.recipient, &form.payload, now).await
     })
     .await
     .map_err(|error| match error {
