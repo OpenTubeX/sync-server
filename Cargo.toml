@@ -23,7 +23,7 @@ utoipa-scalar = { version = "0.3", features = ["actix-web"] }
 
 # Database
 diesel = { version = "2.3" }
-diesel-async = { version = "0.8", features = [
+diesel-async = { version = "0.9", features = [
   "async-connection-wrapper",
   "bb8",
   "migrations",
