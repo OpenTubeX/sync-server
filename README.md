@@ -26,12 +26,14 @@ if a later API version is introduced. The API docs at `/docs` list canonical
 Reverse proxy or WAF rules that match `/v1` paths must also cover their
 unprefixed aliases, such as `/account/delete` alongside `/v1/account/delete`.
 
-## Deprecated playback-speed API
+## Removed playback-speed API
 
-The dedicated `/v1/channel_playback_speeds` endpoints and encrypted
-`playbackSpeeds` collection are deprecated. Current OpenTubeX clients store all
-saved channel preferences, including playback speeds, in the encrypted
-`settings` collection. Current clients still read existing `playbackSpeeds` data
+The dedicated `/v1/channel_playback_speeds` endpoints and their unprefixed aliases
+were removed on 1 October 2026. Uploads to the encrypted `playbackSpeeds`
+collection now return HTTP 405, so older clients cannot recreate or update it.
+Existing encrypted collections remain readable for migration. Current OpenTubeX
+clients store all saved channel preferences, including playback speeds, in the
+encrypted `settings` collection. Current clients still read existing `playbackSpeeds` data
 to migrate it into `settings`, but no longer upload the deprecated collection.
 After successfully syncing speeds into `settings`, current clients acknowledge
 this with `GET /v1/encrypted_sync?playback_speeds_in_settings=true`. For those
@@ -39,13 +41,15 @@ requests, the deprecated collection is no longer required for migration completi
 Requests without this acknowledgment retain the older completion rule so an
 interrupted migration can still discover speeds in the original encrypted document.
 The presence of opaque `settings` alone is not proof that speeds were migrated.
-Older clients may still recreate a deleted `playbackSpeeds` collection.
 
-The dedicated plaintext endpoints will be removed on 1 October 2026. Until
-then, their responses include the standard `Deprecation` and `Sunset` headers.
-The encrypted `playbackSpeeds` collection, its database table, legacy
-migration, and cleanup logic remain available until their removal is scheduled
-separately.
+The plaintext `channel_playback_speed` table is removed by migration
+`202610010000000000`. This migration requires the table to be empty and fails
+with `plaintext_playback_speeds_must_be_migrated` if any rows remain. Operators
+with remaining rows must migrate them using the previous server version before
+upgrading. Follow the backup and migration-approval process described below.
+The migration does not delete encrypted `playbackSpeeds` collections, settings,
+or original encrypted single-document records. Their migration reads remain
+available.
 
 This project is based on the [LibreTube sync server](https://github.com/libre-tube/sync-server).
 
@@ -259,13 +263,15 @@ content. Before the first encrypted collection is uploaded, the manifest's
 Each legacy domain is removed transactionally only after its matching encrypted
 collection is stored, so an interrupted migration can safely resume.
 Ciphertext uploads have collection-specific limits: 2 MiB for settings, 8 MiB
-for profiles, playback speeds, watch statistics, and versioned or legacy
+for profiles, watch statistics, and versioned or legacy
 sessions, 16 MiB for subscriptions, playlist bookmarks, and seen-video or
 seen-post marks, and 64 MiB for playlists and history. The `seen_posts: 1`
 capability enables the separate `seenPosts` collection, so older clients
 syncing `seenVideos` cannot erase post marks. The `watch_stats: 1` capability
 enables the `watchStats` collection for per-device totals.
 The combined active encrypted collections for one account cannot exceed 128 MiB.
+Existing encrypted `playbackSpeeds` collections remain readable for migration,
+but uploads to that collection return HTTP 405.
 
 ### Secure device pairing
 

@@ -258,8 +258,8 @@ pub async fn clear_legacy_collection(
     collection_name: &str,
 ) -> Result<(), DbError> {
     use crate::schema::{
-        channel_playback_speed, playlist, playlist_bookmark, playlist_video_member, subscription,
-        subscription_group, watch_history,
+        playlist, playlist_bookmark, playlist_video_member, subscription, subscription_group,
+        watch_history,
     };
 
     match collection_name {
@@ -283,14 +283,6 @@ pub async fn clear_legacy_collection(
                 .execute(conn)
                 .await?;
         }
-        "playbackSpeeds" => {
-            diesel::delete(
-                channel_playback_speed::table
-                    .filter(channel_playback_speed::account_id.eq(owner_id)),
-            )
-            .execute(conn)
-            .await?;
-        }
         "profiles" => {
             diesel::delete(
                 subscription_group::table.filter(subscription_group::account_id.eq(owner_id)),
@@ -312,8 +304,8 @@ pub async fn clear_legacy_collection(
 
 pub async fn has_legacy_data(conn: &mut DbConnection, owner_id: &str) -> Result<bool, DbError> {
     use crate::schema::{
-        channel_playback_speed, playlist, playlist_bookmark, playlist_video_member, subscription,
-        subscription_group, watch_history,
+        playlist, playlist_bookmark, playlist_video_member, subscription, subscription_group,
+        watch_history,
     };
     use diesel::dsl::exists;
 
@@ -357,16 +349,8 @@ pub async fn has_legacy_data(conn: &mut DbConnection, owner_id: &str) -> Result<
     {
         return Ok(true);
     }
-    if diesel::select(exists(
-        subscription_group::table.filter(subscription_group::account_id.eq(owner_id)),
-    ))
-    .get_result(conn)
-    .await?
-    {
-        return Ok(true);
-    }
     diesel::select(exists(
-        channel_playback_speed::table.filter(channel_playback_speed::account_id.eq(owner_id)),
+        subscription_group::table.filter(subscription_group::account_id.eq(owner_id)),
     ))
     .get_result(conn)
     .await

@@ -103,6 +103,121 @@ async fn response_snapshot(
 }
 
 #[actix_web::test]
+async fn removed_playback_speed_routes_return_not_found() {
+    let pool = pool().await;
+    let token = seed_account(&pool).await;
+    let (app, _) = App::new()
+        .into_utoipa_app()
+        .app_data(web::Data::new(pool))
+        .configure(configure_api_routes)
+        .split_for_parts();
+    let app = test::init_service(app).await;
+
+    for prefix in ["/v1", ""] {
+        for (method, suffix) in [
+            (Method::GET, "/"),
+            (Method::PUT, "/"),
+            (Method::DELETE, "/channel-id"),
+        ] {
+            let uri = format!("{prefix}/channel_playback_speeds{suffix}");
+            for authorization in [None, Some("invalid-token"), Some(token.as_str())] {
+                let mut request = test::TestRequest::default()
+                    .method(method.clone())
+                    .uri(&uri)
+                    .set_json(json!({ "channel_id": "channel-id", "playback_speed": 1.5 }));
+                if let Some(authorization) = authorization {
+                    request = request.insert_header(("Authorization", authorization));
+                }
+                let response =
+                    response_snapshot(test::try_call_service(&app, request.to_request()).await)
+                        .await;
+                assert_eq!(response.0, StatusCode::NOT_FOUND, "{method} {uri}");
+            }
+        }
+    }
+}
+
+#[actix_web::test]
+async fn removed_playback_speed_routes_are_absent_from_openapi() {
+    let (_, api) = App::new()
+        .into_utoipa_app()
+        .configure(configure_api_routes)
+        .split_for_parts();
+    assert!(
+        api.paths
+            .paths
+            .keys()
+            .all(|path| !path.contains("channel_playback_speeds"))
+    );
+}
+
+#[actix_web::test]
+async fn playback_speeds_are_read_only_while_settings_remain_writable() {
+    for prefix in ["/v1", ""] {
+        for existing in [false, true] {
+            let pool = pool().await;
+            let token = seed_account(&pool).await;
+            if existing {
+                crate::database::encrypted_sync::create(
+                    &mut pool.get().await.unwrap(),
+                    &crate::models::EncryptedSync {
+                        account_id: "account".into(),
+                        collection: "playbackSpeeds".into(),
+                        revision: 1,
+                        payload: "original-speeds-ciphertext".into(),
+                    },
+                )
+                .await
+                .unwrap();
+            }
+            let (app, _) = App::new()
+                .into_utoipa_app()
+                .app_data(web::Data::new(pool))
+                .configure(configure_api_routes)
+                .split_for_parts();
+            let app = test::init_service(app).await;
+            let revision = i64::from(existing);
+            let uri = format!("{prefix}/encrypted_sync/playbackSpeeds");
+            let request = test::TestRequest::put()
+                .uri(&uri)
+                .insert_header(("Authorization", token.clone()))
+                .set_json(json!({ "revision": revision, "payload": "new-speeds-ciphertext" }))
+                .to_request();
+            let response = test::call_service(&app, request).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "{uri}, existing={existing}"
+            );
+            assert_eq!(response.headers().get("Allow").unwrap(), "GET");
+            let request = test::TestRequest::get()
+                .uri(&uri)
+                .insert_header(("Authorization", token.clone()))
+                .to_request();
+            let result: Value = test::call_and_read_body_json(&app, request).await;
+            assert_eq!(result["revision"], revision);
+            assert_eq!(
+                result["payload"],
+                if existing {
+                    json!("original-speeds-ciphertext")
+                } else {
+                    Value::Null
+                }
+            );
+            let request = test::TestRequest::put()
+                .uri(&format!("{prefix}/encrypted_sync/settings"))
+                .insert_header(("Authorization", token))
+                .set_json(json!({ "revision": 0, "payload": "settings-ciphertext" }))
+                .to_request();
+            assert_eq!(
+                test::call_service(&app, request).await.status(),
+                StatusCode::OK
+            );
+        }
+    }
+}
+
+#[actix_web::test]
 async fn post_marks_round_trip_independently_of_older_video_clients() {
     let pool = pool().await;
     let token = seed_account(&pool).await;
@@ -122,14 +237,20 @@ async fn post_marks_round_trip_independently_of_older_video_clients() {
             .insert_header(("Authorization", token.clone()))
             .set_json(json!({ "revision": 0, "payload": payload }))
             .to_request();
-        assert_eq!(test::call_service(&app, request).await.status(), StatusCode::OK);
+        assert_eq!(
+            test::call_service(&app, request).await.status(),
+            StatusCode::OK
+        );
     }
     let stale = test::TestRequest::put()
         .uri("/v1/encrypted_sync/seenPosts")
         .insert_header(("Authorization", token.clone()))
         .set_json(json!({ "revision": 0, "payload": "stale-post-marks" }))
         .to_request();
-    assert_eq!(test::call_service(&app, stale).await.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        test::call_service(&app, stale).await.status(),
+        StatusCode::CONFLICT
+    );
     let request = test::TestRequest::get()
         .uri("/v1/encrypted_sync/seenPosts")
         .insert_header(("Authorization", token))

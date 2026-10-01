@@ -11,7 +11,6 @@ use utoipa_actix_web::scope::Scope;
 
 use crate::{models::Account, oidc::OidcError};
 
-pub mod channel_playback_speeds;
 pub mod encrypted_sync;
 pub mod health;
 pub mod pairing;

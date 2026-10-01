@@ -49,19 +49,6 @@ pub async fn count_playlist_videos(
         .await
 }
 
-pub async fn count_playback_speeds(
-    conn: &mut DbConnection,
-    owner_id: &str,
-) -> Result<i64, DbError> {
-    use crate::schema::channel_playback_speed::dsl::*;
-
-    channel_playback_speed
-        .filter(account_id.eq(owner_id))
-        .count()
-        .get_result(conn)
-        .await
-}
-
 /// Whether an account holds more rows than the per-table quota allows.
 ///
 /// Callers check the rows that actually exist rather than predicting how many a
