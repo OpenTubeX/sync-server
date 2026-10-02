@@ -14,6 +14,8 @@ that may already exist. After that first upload, plaintext sync endpoints are
 rejected for the account so an older client cannot accidentally repopulate
 readable data.
 
+This project is based on the [LibreTube sync server](https://github.com/libre-tube/sync-server).
+
 ## API paths
 
 All `/v1` API endpoints also accept the same path without `/v1`. For example,
@@ -50,8 +52,6 @@ upgrading. Follow the backup and migration-approval process described below.
 The migration does not delete encrypted `playbackSpeeds` collections, settings,
 or original encrypted single-document records. Their migration reads remain
 available.
-
-This project is based on the [LibreTube sync server](https://github.com/libre-tube/sync-server).
 
 ## Running
 It's recommended to run the app with Docker.
