@@ -41,7 +41,7 @@ pub struct Config {
     /// for deployments created before the two were split.
     #[serde(default)]
     username_secret: Option<String>,
-    /// Whether to derive the rate limiting client address from
+    /// Whether to derive the rate limiting and access logging client address from
     /// `X-Forwarded-For` instead of the immediate peer.
     ///
     /// Enable this only when the server is reachable exclusively through a

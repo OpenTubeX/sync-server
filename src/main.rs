@@ -120,11 +120,27 @@ async fn main() -> io::Result<()> {
         // docs service must be registered before health handler!
         app.service(Scalar::with_url("/docs", api))
             .service(HealthHandler::get_service())
-            .wrap(middleware::Logger::default())
+            .wrap(access_logger(
+                CONFIG.trust_forwarded_for,
+                CONFIG.trusted_proxy_hops,
+            ))
     })
     .bind(("0.0.0.0", 8080))?
     .run()
     .await
+}
+
+fn access_logger(trust_forwarded_for: bool, trusted_proxy_hops: usize) -> middleware::Logger {
+    middleware::Logger::new("%{client_ip}xi \"%r\" %s %b \"%{Referer}i\" \"%{User-Agent}i\" %T")
+        .custom_request_replace("client_ip", move |request| {
+            handlers::user::request_client_ip(
+                request.request(),
+                trust_forwarded_for,
+                trusted_proxy_hops,
+            )
+            .map(|address| address.to_string())
+            .unwrap_or_else(|| "-".to_owned())
+        })
 }
 
 fn configure_v1_routes(config: &mut ServiceConfig<'_>) {
@@ -296,6 +312,89 @@ async fn run_migrations(pool: &DbPool, database_url: &str, approval: Option<&str
 #[cfg(test)]
 mod tests {
     use super::require_migration_approval;
+
+    struct CapturedAccessLogs(std::sync::Mutex<Vec<String>>);
+
+    impl log::Log for CapturedAccessLogs {
+        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+            metadata.target() == "access-log-test"
+        }
+
+        fn log(&self, record: &log::Record<'_>) {
+            if self.enabled(record.metadata()) {
+                self.0.lock().unwrap().push(record.args().to_string());
+            }
+        }
+
+        fn flush(&self) {}
+    }
+
+    #[actix_web::test]
+    async fn access_logs_resolve_trusted_client_addresses() {
+        use actix_web::{App, HttpResponse, test, web};
+
+        static LOGS: CapturedAccessLogs = CapturedAccessLogs(std::sync::Mutex::new(Vec::new()));
+        log::set_logger(&LOGS).unwrap();
+        log::set_max_level(log::LevelFilter::Info);
+
+        let cases = [
+            (
+                false,
+                2,
+                Some("192.0.2.99, 198.51.100.20, 10.0.0.7"),
+                "172.23.0.1",
+            ),
+            (true, 1, Some("198.51.100.20"), "198.51.100.20"),
+            (
+                true,
+                2,
+                Some("192.0.2.99, 198.51.100.20, 10.0.0.7"),
+                "198.51.100.20",
+            ),
+            (true, 2, Some("2001:db8::7, 10.0.0.7"), "2001:db8::7"),
+            (true, 1, Some("[2001:db8::7]:443"), "2001:db8::7"),
+            (true, 2, None, "172.23.0.1"),
+            (true, 2, Some("198.51.100.20"), "172.23.0.1"),
+            (true, 2, Some("invalid, 10.0.0.7"), "172.23.0.1"),
+        ];
+
+        for (trust_forwarded_for, hops, forwarded, expected) in cases {
+            LOGS.0.lock().unwrap().clear();
+            let app = test::init_service(
+                App::new()
+                    .wrap(
+                        super::access_logger(trust_forwarded_for, hops)
+                            .log_target("access-log-test"),
+                    )
+                    .route(
+                        "/logging-test",
+                        web::get().to(|| async { HttpResponse::NoContent().finish() }),
+                    ),
+            )
+            .await;
+            let mut request = test::TestRequest::get()
+                .uri("/logging-test")
+                .peer_addr("172.23.0.1:1234".parse().unwrap())
+                .insert_header(("Forwarded", "for=192.0.2.99"))
+                .insert_header(("CF-Connecting-IP", "192.0.2.99"))
+                .insert_header(("Authorization", "secret-login-token"));
+            if let Some(forwarded) = forwarded {
+                request = request.insert_header(("X-Forwarded-For", forwarded));
+            }
+            let response = test::call_service(&app, request.to_request()).await;
+            assert_eq!(response.status(), 204);
+            test::read_body(response).await;
+
+            let logs = LOGS.0.lock().unwrap();
+            assert_eq!(logs.len(), 1);
+            assert_eq!(
+                logs[0].split_whitespace().next(),
+                Some(expected),
+                "{logs:?}"
+            );
+            assert!(!logs[0].contains("secret-login-token"));
+        }
+    }
 
     #[cfg(feature = "sqlite")]
     #[derive(diesel::QueryableByName)]
