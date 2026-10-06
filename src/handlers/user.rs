@@ -509,8 +509,8 @@ pub async fn rate_limit_middleware(
     let limiter: Option<&web::Data<RateLimiter>> = req.app_data();
 
     if let Some(limiter) = limiter
-        && let Some(client) = rate_limit_client(
-            &req,
+        && let Some(client) = request_client_ip(
+            req.request(),
             limiter.trusts_forwarded_for(),
             limiter.trusted_proxy_hops(),
         )
@@ -522,9 +522,9 @@ pub async fn rate_limit_middleware(
     next.call(req).await
 }
 
-/// Address to rate limit a request against.
-fn rate_limit_client(
-    req: &ServiceRequest,
+/// Client address shared by rate limiting and access logging.
+pub(crate) fn request_client_ip(
+    req: &HttpRequest,
     trust_forwarded_for: bool,
     trusted_proxy_hops: usize,
 ) -> Option<IpAddr> {
@@ -564,16 +564,11 @@ fn forwarded_client(header: &str, trusted_proxy_hops: usize) -> Option<IpAddr> {
 }
 
 pub(crate) fn request_within_rate_limit(req: &HttpRequest, limiter: &RateLimiter) -> bool {
-    let peer = req.peer_addr().map(|address| address.ip());
-    let client = if limiter.trusts_forwarded_for() {
-        req.headers()
-            .get("X-Forwarded-For")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|header| forwarded_client(header, limiter.trusted_proxy_hops()))
-            .or(peer)
-    } else {
-        peer
-    };
+    let client = request_client_ip(
+        req,
+        limiter.trusts_forwarded_for(),
+        limiter.trusted_proxy_hops(),
+    );
     client.is_none_or(|address| limiter.check(address))
 }
 
