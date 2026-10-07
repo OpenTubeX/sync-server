@@ -45,6 +45,8 @@ mod schema;
 mod sync_notifications;
 mod validation;
 
+const BASE_API_PATH: &str = "/v1";
+
 static CONFIG: LazyLock<config::Config> = LazyLock::new(|| match config::build_config() {
     Ok(c) => c,
     Err(e) => {
@@ -163,7 +165,7 @@ fn configure_api_routes(config: &mut ServiceConfig<'_>) {
     });
     // Register canonical routes last so named URLs (including OIDC callbacks)
     // continue to resolve to /v1.
-    config.service(utoipa_actix_web::scope("/v1").configure(configure_v1_routes));
+    config.service(utoipa_actix_web::scope(BASE_API_PATH).configure(configure_v1_routes));
 }
 
 #[cfg(all(test, feature = "sqlite"))]

@@ -754,6 +754,34 @@ mod tests {
         ));
     }
 
+    #[actix_web::test]
+    async fn oidc_query_parameters_are_documented_without_a_configured_provider() {
+        use utoipa_actix_web::AppExt;
+
+        let (_, api) = App::new()
+            .into_utoipa_app()
+            .service(super::authenticate_oidc_account)
+            .service(super::authenticate_oidc_account_callback)
+            .service(super::delete_oidc_account)
+            .service(super::delete_oidc_account_callback)
+            .split_for_parts();
+        let api = serde_json::to_value(api).unwrap();
+        for (path, expected) in [
+            ("/oidc/authenticate", vec!["redirect_url", "device_id"]),
+            ("/oidc/delete", vec!["redirect_url", "device_id"]),
+            ("/oidc/authenticate/callback", vec!["code", "state"]),
+            ("/oidc/delete/callback", vec!["code", "state"]),
+        ] {
+            let parameters = api["paths"][path]["get"]["parameters"].as_array().unwrap();
+            let names: Vec<_> = parameters
+                .iter()
+                .map(|p| p["name"].as_str().unwrap())
+                .collect();
+            assert_eq!(names, expected, "{path}");
+            assert!(parameters.iter().all(|p| p["in"] == "query"), "{path}");
+        }
+    }
+
     // Nested so that `actix_web::test` imported above does not shadow the
     // built-in `#[test]` attribute for these synchronous tests.
     mod forwarded {
@@ -1075,7 +1103,7 @@ mod tests {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 struct OidcAuthenticationRequest {
     /// Url to redirect to once authentication succeeded.
     /// Passes a `token` query parameter to the URL, which is a valid JWT for the authenticated account.
@@ -1089,7 +1117,7 @@ struct OidcCallbackContext {
     device_id: Option<String>,
 }
 
-#[utoipa::path]
+#[utoipa::path(params(OidcAuthenticationRequest))]
 #[get("/oidc/authenticate")]
 async fn authenticate_oidc_account(
     req: HttpRequest,
@@ -1124,13 +1152,13 @@ fn oidc_username_hash(oidc_sub: &str) -> String {
     hash_accountname(&username, CONFIG.username_secret().as_bytes())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 struct OidcCallbackData {
     code: String,
     state: String,
 }
 
-#[utoipa::path]
+#[utoipa::path(params(OidcCallbackData))]
 #[get("/oidc/authenticate/callback")]
 async fn authenticate_oidc_account_callback(
     pool: WebData,
@@ -1180,7 +1208,7 @@ async fn authenticate_oidc_account_callback(
     )))
 }
 
-#[utoipa::path]
+#[utoipa::path(params(OidcAuthenticationRequest))]
 #[get("/oidc/delete")]
 async fn delete_oidc_account(
     req: HttpRequest,
@@ -1206,7 +1234,7 @@ async fn delete_oidc_account(
     Ok(Redirect::to(redirect_url))
 }
 
-#[utoipa::path]
+#[utoipa::path(params(OidcCallbackData))]
 #[get("/oidc/delete/callback")]
 async fn delete_oidc_account_callback(
     pool: WebData,

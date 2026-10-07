@@ -1,8 +1,11 @@
-use actix_web::{Responder, routes, web};
+use actix_web::{HttpResponse, Responder, get, routes, web};
 use utoipa_actix_web::scope;
 
-use crate::dto::HealthResponse;
-use crate::handlers::{ScopedHandler, encrypted_sync::sync_capabilities};
+use crate::{
+    CONFIG,
+    dto::{ExtendedMetaResponse, HealthResponse, LibreTubeApiMetaResponse, MetaResponse},
+    handlers::{HandlerResult, ScopedHandler, encrypted_sync::sync_capabilities},
+};
 
 pub struct HealthHandler {}
 impl ScopedHandler for HealthHandler {
@@ -18,6 +21,7 @@ impl ScopedHandler for HealthHandler {
         scope::scope("")
             .app_data(web::Data::new(crate::CONFIG.privacy_policy_url.clone()))
             .service(health_state)
+            .service(server_metainfo)
     }
 }
 
@@ -60,4 +64,18 @@ mod tests {
             }
         }
     }
+}
+
+#[utoipa::path(responses((status = OK, body = MetaResponse)))]
+#[get("/meta")]
+async fn server_metainfo() -> HandlerResult<impl Responder> {
+    Ok(HttpResponse::Ok().json(MetaResponse {
+        api: LibreTubeApiMetaResponse {
+            base: env!("CARGO_PKG_VERSION").into(),
+        },
+        extras: ExtendedMetaResponse {
+            version: env!("CARGO_PKG_VERSION").into(),
+            oidc: CONFIG.oidc.is_some(),
+        },
+    }))
 }

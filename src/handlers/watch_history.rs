@@ -179,22 +179,22 @@ async fn add_to_watch_history_bulk(
     Ok(HttpResponse::Ok())
 }
 
-#[derive(Deserialize, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Deserialize, Eq, PartialEq, PartialOrd, Ord, utoipa::ToSchema)]
 enum WatchHistoryOrder {
     #[serde(rename = "added_date_asc")]
     AddedDateAscending,
     #[serde(rename = "added_date_desc")]
     AddedDateDescending,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 struct WatchHistoryPaginationRequest {
-    page: u32,
+    page: Option<u32>,
     page_size: Option<u32>,
     state: Option<WatchedState>,
     order: Option<WatchHistoryOrder>,
 }
 
-#[utoipa::path(responses((status = OK, body = Vec<ExtendedWatchHistoryItem>)), params(("page" = u32, Query), ("page_size" = Option<u32>, Query)), security(("api_jwt_token" = [])))]
+#[utoipa::path(responses((status = OK, body = Vec<ExtendedWatchHistoryItem>)), params(WatchHistoryPaginationRequest), security(("api_jwt_token" = [])))]
 #[get("/")]
 async fn get_watch_history(
     account: Account,
@@ -215,7 +215,7 @@ async fn get_watch_history(
     match get_watch_history_by_account_id(
         &mut conn,
         &account.id,
-        params.page,
+        params.page.unwrap_or(1),
         page_size,
         &watched_state,
         params.order == Some(WatchHistoryOrder::AddedDateAscending),

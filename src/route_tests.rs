@@ -461,7 +461,7 @@ async fn aliases_share_rate_limits_and_preserve_other_routes() {
             StatusCode::OK
         );
     }
-    for uri in ["/", "/health", "/healthz", "/docs"] {
+    for uri in ["/", "/health", "/healthz", "/docs", "/meta"] {
         let response =
             test::call_service(&app, test::TestRequest::get().uri(uri).to_request()).await;
         assert_eq!(response.status(), StatusCode::OK, "{uri}");
@@ -482,5 +482,102 @@ async fn aliases_share_rate_limits_and_preserve_other_routes() {
             StatusCode::NOT_FOUND,
             "{uri}"
         );
+    }
+}
+
+#[actix_web::test]
+async fn metadata_is_public_and_reports_version_and_oidc_configuration() {
+    let (app, _) = App::new()
+        .into_utoipa_app()
+        .configure(configure_api_routes)
+        .split_for_parts();
+    let app = test::init_service(app.service(HealthHandler::get_service())).await;
+    let request = test::TestRequest::get().uri("/meta").to_request();
+    let response = test::call_service(&app, request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = test::read_body_json(response).await;
+    assert_eq!(
+        body,
+        json!({
+            "api": { "libretube-sync": env!("CARGO_PKG_VERSION") },
+            "version": env!("CARGO_PKG_VERSION"),
+            "oidc": CONFIG.oidc.is_some(),
+        })
+    );
+}
+
+#[actix_web::test]
+async fn upstream_query_parameters_are_documented() {
+    let (_, api) = App::new()
+        .into_utoipa_app()
+        .configure(configure_api_routes)
+        .split_for_parts();
+    let api = serde_json::to_value(api).unwrap();
+    let parameters = api["paths"]["/v1/watch_history/"]["get"]["parameters"]
+        .as_array()
+        .unwrap();
+    let names: Vec<_> = parameters
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["page", "page_size", "state", "order"]);
+    assert!(parameters.iter().all(|p| p["in"] == "query"));
+    let history = &api["paths"]["/v1/watch_history/"]["get"]["parameters"];
+    assert!(
+        history
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["required"] == false)
+    );
+}
+
+#[actix_web::test]
+async fn history_pagination_defaults_page_and_preserves_fork_limits() {
+    let pool = pool().await;
+    let token = seed_account(&pool).await;
+    pool.get().await.unwrap().spawn_blocking(|conn| {
+        use diesel::connection::SimpleConnection;
+        conn.batch_execute(
+            "INSERT INTO channel (id, name, verified) VALUES ('channel', 'Channel', FALSE);
+             WITH RECURSIVE numbers(n) AS (VALUES(1) UNION ALL SELECT n + 1 FROM numbers WHERE n < 1001)
+             INSERT INTO video (id, title, upload_date, thumbnail_url, duration, uploader_id)
+               SELECT 'video-' || n, 'Video', n, 'https://example.test/thumbnail', 60, 'channel' FROM numbers;
+             INSERT INTO watch_history (video_id, account_id, added_date, watched_state)
+               SELECT id, 'account', upload_date, 'watching' FROM video;",
+        )?;
+        Ok(())
+    }).await.unwrap();
+    let (app, _) = App::new()
+        .into_utoipa_app()
+        .app_data(web::Data::new(pool))
+        .configure(configure_api_routes)
+        .split_for_parts();
+    let app = test::init_service(app).await;
+    for prefix in ["/v1", ""] {
+        for (query, count, first) in [
+            ("", 50, Some("video-1001")),
+            ("?page_size=100", 100, Some("video-1001")),
+            ("?page=2&page_size=100", 100, Some("video-901")),
+            ("?page=0&page_size=0", 1, Some("video-1001")),
+            ("?page_size=4294967295", 1000, Some("video-1001")),
+            ("?page=2&page_size=1000", 1, Some("video-1")),
+            ("?page=4294967295&page_size=1000", 0, None),
+        ] {
+            let uri = format!("{prefix}/watch_history/{query}");
+            let request = test::TestRequest::get()
+                .uri(&uri)
+                .insert_header(("Authorization", token.clone()))
+                .to_request();
+            let response = test::call_service(&app, request).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            let body: Vec<Value> = test::read_body_json(response).await;
+            assert_eq!(body.len(), count, "{uri}");
+            assert_eq!(
+                body.first().and_then(|item| item["video"]["id"].as_str()),
+                first,
+                "{uri}"
+            );
+        }
     }
 }
