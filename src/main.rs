@@ -3,17 +3,28 @@ extern crate diesel;
 
 use std::{io, sync::LazyLock};
 
+// only used by the sqlite pre-migration backup
+#[cfg(feature = "sqlite")]
+use std::path::Path;
+
 use actix_web::{App, HttpServer, middleware, web};
+#[cfg(feature = "sqlite")]
+use diesel::connection::SimpleConnection;
+#[cfg(feature = "sqlite")]
+use diesel_async::pooled_connection::ManagerConfig;
 use diesel_async::pooled_connection::{AsyncDieselConnectionManager, PoolError, bb8::Pool};
+#[cfg(feature = "sqlite")]
+use diesel_async::{AsyncConnection, SimpleAsyncConnection};
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 use log::error;
 use utoipa::OpenApi;
-use utoipa_actix_web::AppExt;
+use utoipa_actix_web::{AppExt, service_config::ServiceConfig};
 use utoipa_scalar::{Scalar, Servable};
 
 use crate::{
     handlers::{
-        ScopedHandler, health::HealthHandler, playlist_bookmarks::PlaylistBookmarksHandler,
+        ScopedHandler, encrypted_sync::EncryptedSyncHandler, health::HealthHandler,
+        pairing::PairingHandler, playlist_bookmarks::PlaylistBookmarksHandler,
         playlists::PlaylistsHandler, subscriptions::SubscriptionsHandler, user::UserHandler,
         watch_history::WatchHistoryHandler,
     },
@@ -29,7 +40,9 @@ mod handlers;
 mod models;
 mod oidc;
 mod openapi;
+mod rate_limit;
 mod schema;
+mod sync_notifications;
 mod validation;
 
 const BASE_API_PATH: &str = "/v1";
@@ -70,7 +83,13 @@ async fn main() -> io::Result<()> {
     };
 
     // run database migrations (must be done BEFORE the server is started!)
-    run_migrations(&pool).await;
+    run_migrations(
+        &pool,
+        &CONFIG.database_url,
+        CONFIG.migration_approval.as_deref(),
+    )
+    .await;
+    handlers::session::start_expired_session_cleanup(pool.clone());
 
     if let Some(oidc) = &CONFIG.oidc {
         init_oidc(oidc).await;
@@ -78,19 +97,22 @@ async fn main() -> io::Result<()> {
 
     log::info!("starting HTTP server at http://localhost:8080");
 
+    // Built once and shared, because the closure below runs per worker. Building
+    // it inside would give each worker separate counters, multiplying the
+    // effective rate limit by the number of workers.
+    let rate_limiter = web::Data::new(
+        rate_limit::RateLimiter::default()
+            .trusting_forwarded_for(CONFIG.trust_forwarded_for)
+            .with_trusted_proxy_hops(CONFIG.trusted_proxy_hops),
+    );
+
     HttpServer::new(move || {
         let (app, generated_api) = App::new()
             .into_utoipa_app()
             // add DB pool handle to app data; enables use of `web::Data<DbPool>` extractor
             .app_data(web::Data::new(pool.clone()))
-            .service(
-                utoipa_actix_web::scope(BASE_API_PATH)
-                    .service(UserHandler::get_service())
-                    .service(SubscriptionsHandler::get_service())
-                    .service(PlaylistsHandler::get_service())
-                    .service(PlaylistBookmarksHandler::get_service())
-                    .service(WatchHistoryHandler::get_service()),
-            )
+            .app_data(rate_limiter.clone())
+            .configure(configure_api_routes)
             .split_for_parts();
 
         // add additional meta and security info
@@ -100,31 +122,164 @@ async fn main() -> io::Result<()> {
         // docs service must be registered before health handler!
         app.service(Scalar::with_url("/docs", api))
             .service(HealthHandler::get_service())
-            .wrap(middleware::Logger::default())
+            .wrap(access_logger(
+                CONFIG.trust_forwarded_for,
+                CONFIG.trusted_proxy_hops,
+            ))
     })
     .bind(("0.0.0.0", 8080))?
     .run()
     .await
 }
 
+fn access_logger(trust_forwarded_for: bool, trusted_proxy_hops: usize) -> middleware::Logger {
+    middleware::Logger::new("%{client_ip}xi \"%r\" %s %b \"%{Referer}i\" \"%{User-Agent}i\" %T")
+        .custom_request_replace("client_ip", move |request| {
+            handlers::user::request_client_ip(
+                request.request(),
+                trust_forwarded_for,
+                trusted_proxy_hops,
+            )
+            .map(|address| address.to_string())
+            .unwrap_or_else(|| "-".to_owned())
+        })
+}
+
+fn configure_v1_routes(config: &mut ServiceConfig<'_>) {
+    config
+        .service(UserHandler::get_service())
+        .service(SubscriptionsHandler::get_service())
+        .service(PlaylistsHandler::get_service())
+        .service(PlaylistBookmarksHandler::get_service())
+        .service(WatchHistoryHandler::get_service())
+        .service(EncryptedSyncHandler::get_service())
+        .service(PairingHandler::get_service());
+}
+
+fn configure_api_routes(config: &mut ServiceConfig<'_>) {
+    // Register unprefixed v1 aliases directly, without an empty scope that could
+    // swallow docs or health routes. Only canonical paths enter the OpenAPI spec.
+    config.map(|config| {
+        configure_v1_routes(&mut ServiceConfig::new(config));
+        config
+    });
+    // Register canonical routes last so named URLs (including OIDC callbacks)
+    // continue to resolve to /v1.
+    config.service(utoipa_actix_web::scope(BASE_API_PATH).configure(configure_v1_routes));
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod route_tests;
+
 /// Initialize database connection pool based on `DATABASE_URL` environment variable.
 ///
 /// See more: <https://docs.rs/diesel-async/latest/diesel_async/pooled_connection/index.html#modules>.
 async fn initialize_db_pool(db_url: &str) -> Result<DbPool, PoolError> {
+    #[cfg(feature = "sqlite")]
+    let connection_manager = {
+        let mut manager_config = ManagerConfig::default();
+        manager_config.custom_setup = Box::new(|url| {
+            let url = url.to_owned();
+            Box::pin(async move {
+                let mut conn = DbConnection::establish(&url).await?;
+                // `foreign_keys` defaults to OFF in SQLite and must be enabled per
+                // connection, otherwise none of the ON DELETE CASCADE constraints
+                // fire and deleting an account orphans all of its rows.
+                conn.batch_execute(
+                    "PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 30000; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;",
+                )
+                .await
+                .map_err(|err| diesel::ConnectionError::BadConnection(err.to_string()))?;
+                Ok(conn)
+            })
+        });
+        AsyncDieselConnectionManager::<DbConnection>::new_with_config(db_url, manager_config)
+    };
+
+    #[cfg(feature = "postgres")]
     let connection_manager = AsyncDieselConnectionManager::<DbConnection>::new(db_url);
+
     Pool::builder().build(connection_manager).await
 }
 
-async fn run_migrations(pool: &DbPool) {
+fn require_migration_approval(
+    has_applied_migrations: bool,
+    pending_versions: &[String],
+    approval: Option<&str>,
+) -> Result<(), String> {
+    if !has_applied_migrations || pending_versions.is_empty() {
+        return Ok(());
+    }
+
+    let required = pending_versions.join(",");
+    if approval == Some(required.as_str()) {
+        return Ok(());
+    }
+
+    Err(format!(
+        "refusing to migrate an existing database; create and verify a backup, then set MIGRATION_APPROVAL={required} for this deployment"
+    ))
+}
+
+#[cfg(feature = "sqlite")]
+fn back_up_sqlite_before_migration(
+    conn: &mut diesel::SqliteConnection,
+    database_url: &str,
+    latest_version: &str,
+) {
+    let backup_path = format!("{database_url}.pre-migration-{latest_version}");
+    if Path::new(&backup_path).exists() {
+        log::info!("using existing pre-migration backup at {backup_path}");
+        return;
+    }
+
+    let escaped_path = backup_path.replace('\'', "''");
+    conn.batch_execute(&format!("VACUUM INTO '{escaped_path}'"))
+        .unwrap_or_else(|error| {
+            panic!("failed to create migration backup at {backup_path}: {error}")
+        });
+    log::info!("created pre-migration backup at {backup_path}");
+}
+
+async fn run_migrations(pool: &DbPool, database_url: &str, approval: Option<&str>) {
     // https://github.com/diesel-rs/diesel_async/discussions/268
-    let conn = pool.get_owned().await.unwrap();
+    //
+    // An unwritable data directory shows up here as a pool timeout rather than a
+    // permission error, which is confusing enough to be worth calling out.
+    let conn = pool.get_owned().await.unwrap_or_else(|err| {
+        panic!(
+            "could not open the database at {database_url}: {err}. \
+             If this is a timeout, check that the database and its directory are \
+             writable by the user the server runs as (uid 10001 in the Docker image)."
+        )
+    });
 
     #[cfg(feature = "sqlite")]
     {
         let mut conn = conn;
-        conn.spawn_blocking(|conn| {
-            // we panic if migrations fail, because otherwise the app wouldn't work anyways
-            conn.run_pending_migrations(MIGRATIONS).unwrap();
+        let database_url = database_url.to_owned();
+        let approval = approval.map(str::to_owned);
+        conn.spawn_blocking(move |conn| {
+            let pending = conn.pending_migrations(MIGRATIONS).unwrap();
+            let pending_versions = pending
+                .iter()
+                .map(|migration| migration.name().version().to_string())
+                .collect::<Vec<_>>();
+            let has_applied_migrations = !conn.applied_migrations().unwrap().is_empty();
+            require_migration_approval(
+                has_applied_migrations,
+                &pending_versions,
+                approval.as_deref(),
+            )
+            .unwrap_or_else(|message| panic!("{message}"));
+            if has_applied_migrations && !pending_versions.is_empty() {
+                back_up_sqlite_before_migration(
+                    conn,
+                    &database_url,
+                    pending_versions.last().unwrap(),
+                );
+            }
+            conn.run_migrations(&pending).unwrap();
             Ok(())
         })
         .await
@@ -134,11 +289,278 @@ async fn run_migrations(pool: &DbPool) {
     #[cfg(feature = "postgres")]
     {
         // must be spawned blocking, otherwise this would raise 'can call blocking only when running on the multi-threaded runtime': see https://github.com/rwf2/Rocket/pull/2648
+        let approval = approval.map(str::to_owned);
         actix_web::rt::task::spawn_blocking(move || {
             let mut harness = diesel_async::AsyncMigrationHarness::new(conn);
-            harness.run_pending_migrations(MIGRATIONS).unwrap();
+            let pending = harness.pending_migrations(MIGRATIONS).unwrap();
+            let pending_versions = pending
+                .iter()
+                .map(|migration| migration.name().version().to_string())
+                .collect::<Vec<_>>();
+            let has_applied_migrations = !harness.applied_migrations().unwrap().is_empty();
+            require_migration_approval(
+                has_applied_migrations,
+                &pending_versions,
+                approval.as_deref(),
+            )
+            .unwrap_or_else(|message| panic!("{message}"));
+            harness.run_migrations(&pending).unwrap();
         })
         .await
         .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::require_migration_approval;
+
+    struct CapturedAccessLogs(std::sync::Mutex<Vec<String>>);
+
+    impl log::Log for CapturedAccessLogs {
+        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+            metadata.target() == "access-log-test"
+        }
+
+        fn log(&self, record: &log::Record<'_>) {
+            if self.enabled(record.metadata()) {
+                self.0.lock().unwrap().push(record.args().to_string());
+            }
+        }
+
+        fn flush(&self) {}
+    }
+
+    #[actix_web::test]
+    async fn access_logs_resolve_trusted_client_addresses() {
+        use actix_web::{App, HttpResponse, test, web};
+
+        static LOGS: CapturedAccessLogs = CapturedAccessLogs(std::sync::Mutex::new(Vec::new()));
+        log::set_logger(&LOGS).unwrap();
+        log::set_max_level(log::LevelFilter::Info);
+
+        let cases = [
+            (
+                false,
+                2,
+                Some("192.0.2.99, 198.51.100.20, 10.0.0.7"),
+                "172.23.0.1",
+            ),
+            (true, 1, Some("198.51.100.20"), "198.51.100.20"),
+            (
+                true,
+                2,
+                Some("192.0.2.99, 198.51.100.20, 10.0.0.7"),
+                "198.51.100.20",
+            ),
+            (true, 2, Some("2001:db8::7, 10.0.0.7"), "2001:db8::7"),
+            (true, 1, Some("[2001:db8::7]:443"), "2001:db8::7"),
+            (true, 2, None, "172.23.0.1"),
+            (true, 2, Some("198.51.100.20"), "172.23.0.1"),
+            (true, 2, Some("invalid, 10.0.0.7"), "172.23.0.1"),
+        ];
+
+        for (trust_forwarded_for, hops, forwarded, expected) in cases {
+            LOGS.0.lock().unwrap().clear();
+            let app = test::init_service(
+                App::new()
+                    .wrap(
+                        super::access_logger(trust_forwarded_for, hops)
+                            .log_target("access-log-test"),
+                    )
+                    .route(
+                        "/logging-test",
+                        web::get().to(|| async { HttpResponse::NoContent().finish() }),
+                    ),
+            )
+            .await;
+            let mut request = test::TestRequest::get()
+                .uri("/logging-test")
+                .peer_addr("172.23.0.1:1234".parse().unwrap())
+                .insert_header(("Forwarded", "for=192.0.2.99"))
+                .insert_header(("CF-Connecting-IP", "192.0.2.99"))
+                .insert_header(("Authorization", "secret-login-token"));
+            if let Some(forwarded) = forwarded {
+                request = request.insert_header(("X-Forwarded-For", forwarded));
+            }
+            let response = test::call_service(&app, request.to_request()).await;
+            assert_eq!(response.status(), 204);
+            test::read_body(response).await;
+
+            let logs = LOGS.0.lock().unwrap();
+            assert_eq!(logs.len(), 1);
+            assert_eq!(
+                logs[0].split_whitespace().next(),
+                Some(expected),
+                "{logs:?}"
+            );
+            assert!(!logs[0].contains("secret-login-token"));
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[derive(diesel::QueryableByName)]
+    struct RowCount {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        count: i64,
+    }
+
+    #[cfg(feature = "sqlite")]
+    fn table_count(conn: &mut diesel::SqliteConnection, table: &str) -> i64 {
+        use diesel::RunQueryDsl;
+
+        diesel::sql_query(format!("SELECT COUNT(*) AS count FROM {table}"))
+            .get_result::<RowCount>(conn)
+            .unwrap()
+            .count
+    }
+
+    #[cfg(feature = "sqlite")]
+    fn foreign_keys_enabled(conn: &mut diesel::SqliteConnection) -> bool {
+        use diesel::RunQueryDsl;
+
+        diesel::sql_query(
+            "SELECT COUNT(*) AS count FROM pragma_foreign_keys WHERE foreign_keys = 1",
+        )
+        .get_result::<RowCount>(conn)
+        .unwrap()
+        .count
+            == 1
+    }
+
+    #[test]
+    fn fresh_database_does_not_require_approval() {
+        assert!(require_migration_approval(false, &["20260721".to_owned()], None).is_ok());
+    }
+
+    #[test]
+    fn existing_database_requires_exact_pending_versions() {
+        let pending = ["20260721".to_owned(), "20260722".to_owned()];
+        assert!(require_migration_approval(true, &pending, None).is_err());
+        assert!(require_migration_approval(true, &pending, Some("20260721")).is_err());
+        assert!(require_migration_approval(true, &pending, Some("20260721,20260722")).is_ok());
+    }
+
+    #[cfg(feature = "sqlite")]
+    fn database_before_playback_speed_retirement() -> diesel::SqliteConnection {
+        use diesel::Connection;
+        use diesel::connection::SimpleConnection;
+        use diesel_migrations::MigrationHarness;
+
+        let mut conn = diesel::SqliteConnection::establish(":memory:").unwrap();
+        conn.batch_execute("PRAGMA foreign_keys = ON;").unwrap();
+        let migrations = conn.pending_migrations(super::MIGRATIONS).unwrap();
+        let retirement = migrations
+            .iter()
+            .position(|migration| migration.name().version().to_string() == "202610010000000000")
+            .expect("playback-speed retirement migration must be embedded");
+        conn.run_migrations(&migrations[..retirement]).unwrap();
+        conn.batch_execute(
+            "INSERT INTO account (id, name_hash) VALUES ('owner', 'owner-hash');
+             INSERT INTO encrypted_sync (account_id, collection, revision, payload)
+               VALUES ('owner', 'settings', 1, 'settings-ciphertext'),
+                      ('owner', 'playbackSpeeds', 1, 'speeds-ciphertext');
+             INSERT INTO encrypted_sync_single_document (account_id, revision, payload)
+               VALUES ('owner', 1, 'legacy-ciphertext');",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn playback_speed_retirement_preserves_encrypted_data_and_can_be_reverted() {
+        use diesel::RunQueryDsl;
+        use diesel_migrations::MigrationHarness;
+
+        let mut conn = database_before_playback_speed_retirement();
+        conn.run_pending_migrations(super::MIGRATIONS).unwrap();
+        assert_eq!(
+            diesel::sql_query(
+                "SELECT COUNT(*) AS count FROM sqlite_master WHERE name = 'channel_playback_speed'"
+            )
+            .get_result::<RowCount>(&mut conn)
+            .unwrap()
+            .count,
+            0
+        );
+        assert_eq!(table_count(&mut conn, "encrypted_sync"), 2);
+        assert_eq!(table_count(&mut conn, "encrypted_sync_single_document"), 1);
+        conn.revert_last_migration(super::MIGRATIONS).unwrap();
+        assert_eq!(table_count(&mut conn, "channel_playback_speed"), 0);
+        assert_eq!(table_count(&mut conn, "encrypted_sync"), 2);
+        assert_eq!(table_count(&mut conn, "encrypted_sync_single_document"), 1);
+        assert!(foreign_keys_enabled(&mut conn));
+        assert_eq!(table_count(&mut conn, "pragma_foreign_key_check"), 0);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn playback_speed_retirement_refuses_to_delete_unmigrated_plaintext_rows() {
+        use diesel::connection::SimpleConnection;
+        use diesel_migrations::MigrationHarness;
+
+        let mut conn = database_before_playback_speed_retirement();
+        conn.batch_execute(
+            "INSERT INTO channel_playback_speed (account_id, channel_id, playback_speed)
+               VALUES ('owner', 'channel-id', 1.5);",
+        )
+        .unwrap();
+        let error = conn.run_pending_migrations(super::MIGRATIONS).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("plaintext_playback_speeds_must_be_migrated")
+        );
+        assert_eq!(table_count(&mut conn, "channel_playback_speed"), 1);
+        assert_eq!(table_count(&mut conn, "encrypted_sync"), 2);
+        assert_eq!(table_count(&mut conn, "encrypted_sync_single_document"), 1);
+        conn.batch_execute("DELETE FROM channel_playback_speed;")
+            .unwrap();
+        conn.run_pending_migrations(super::MIGRATIONS).unwrap();
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn channel_migration_preserves_referencing_rows() {
+        use diesel::Connection;
+        use diesel::connection::SimpleConnection;
+        use diesel_migrations::MigrationHarness;
+
+        let mut conn = diesel::SqliteConnection::establish(":memory:").unwrap();
+        conn.batch_execute("PRAGMA foreign_keys = ON;").unwrap();
+
+        let migrations = conn.pending_migrations(super::MIGRATIONS).unwrap();
+        let channel_migration = migrations
+            .iter()
+            .position(|migration| migration.name().version().to_string() == "202608181323460000")
+            .expect("channel migration must be embedded");
+
+        conn.run_migrations(&migrations[..channel_migration])
+            .unwrap();
+        conn.batch_execute(
+            "INSERT INTO channel (id, name, avatar, verified) \
+             VALUES ('channel-1', 'Channel', 'https://example.test/avatar', false); \
+             INSERT INTO video (id, title, upload_date, uploader_id, thumbnail_url, duration) \
+             VALUES ('video-1', 'Video', 0, 'channel-1', \
+                     'https://example.test/thumbnail', 60);",
+        )
+        .unwrap();
+
+        assert_eq!(table_count(&mut conn, "video"), 1);
+        conn.run_migration(migrations[channel_migration].as_ref())
+            .unwrap();
+        assert!(foreign_keys_enabled(&mut conn));
+        assert_eq!(table_count(&mut conn, "channel"), 1);
+        assert_eq!(table_count(&mut conn, "video"), 1);
+
+        conn.batch_execute("UPDATE channel SET avatar = NULL;")
+            .unwrap();
+        conn.revert_migration(migrations[channel_migration].as_ref())
+            .unwrap();
+        assert!(foreign_keys_enabled(&mut conn));
+        assert_eq!(table_count(&mut conn, "channel"), 1);
+        assert_eq!(table_count(&mut conn, "video"), 1);
+        assert_eq!(table_count(&mut conn, "pragma_foreign_key_check"), 0);
     }
 }

@@ -12,7 +12,7 @@ jobs:
           - postgres
           - sqlite
 
-    uses: docker/github-builder/.github/workflows/build.yml@v1
+    uses: docker/github-builder/.github/workflows/build.yml@3415a188caae9a0da7fba83bc06985776e0b1790 # v1.14.0
     permissions:
       contents: read
       packages: write

@@ -1,5 +1,7 @@
 -- This file should undo anything in `up.sql`
-DELETE FROM account WHERE oidc_sub IS NOT NULL;   
+PRAGMA foreign_keys = OFF;
+
+DELETE FROM account WHERE oidc_sub IS NOT NULL;
 
 ALTER TABLE account DROP COLUMN oidc_sub;
 CREATE TABLE account_temp(
@@ -10,3 +12,5 @@ CREATE TABLE account_temp(
 INSERT INTO account_temp SELECT * FROM account;
 DROP TABLE account;
 ALTER TABLE account_temp RENAME TO account;
+
+PRAGMA foreign_keys = ON;

@@ -1,14 +1,24 @@
 services:
   sync:
-    container_name: libretube-sync
-    image: ghcr.io/libre-tube/sync-server:main-postgres
+    container_name: opentubex-sync
+    image: ghcr.io/opentubex/sync-server:latest-postgres
     build:
       context: .
       args:
         - "DATABASE_BACKEND=postgres"
     environment:
-      - "DATABASE_URL=postgres://postgres:password@db/libretube-sync"
-      - "SECRET_KEY=changeme"
+      - "DATABASE_URL=postgres://postgres:${POSTGRES_PASSWORD:?generate one with: openssl rand -hex 32}@db/opentubex-sync"
+      # REQUIRED. Generate with `openssl rand -hex 32` and put it in a .env file
+      # next to this compose file. The server refuses to start on a placeholder
+      # value or anything shorter than 32 bytes.
+      - "SECRET_KEY=${SECRET_KEY:?generate one with: openssl rand -hex 32}"
+      # Set to the same value as SECRET_KEY. Keeping it separate is what allows
+      # SECRET_KEY to be rotated later without locking out every account.
+      - "USERNAME_SECRET=${USERNAME_SECRET:?set this to the same value as SECRET_KEY}"
+      # These files publish to 127.0.0.1, i.e. behind a reverse proxy, where
+      # every request arrives from the proxy and all clients would otherwise
+      # share one rate limit bucket. Remove this if exposing the port directly.
+      - "TRUST_FORWARDED_FOR=true"
       - "ALLOW_REGISTRATION=true"
       - "VALIDATE_SUBMITTED_METADATA=true"
     # Or use a configuration file:
@@ -22,11 +32,11 @@ services:
 
   db:
     image: postgres:18
-    container_name: libretube-sync-postgres
+    container_name: opentubex-sync-postgres
     environment:
       - "POSTGRES_USER=postgres"
-      - "POSTGRES_PASSWORD=password"
-      - "POSTGRES_DB=libretube-sync"
+      - "POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?generate one with: openssl rand -hex 32}"
+      - "POSTGRES_DB=opentubex-sync"
     volumes:
       - ./data:/var/lib/postgresql
     restart: unless-stopped

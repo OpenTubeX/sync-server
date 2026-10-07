@@ -1,11 +1,20 @@
 pub mod account;
+pub mod account_session;
 pub mod channel;
+pub mod encrypted_sync;
+pub mod pairing;
 pub mod playlist;
 pub mod playlist_bookmark;
 pub mod public_playlist;
+pub mod quota;
 pub mod subscription;
 pub mod subscription_groups;
 pub mod video;
 pub mod watch_history;
 
 type DbError = diesel::result::Error;
+
+#[cfg(all(test, feature = "sqlite"))]
+mod ownership_tests;
+
+pub mod sync_event;

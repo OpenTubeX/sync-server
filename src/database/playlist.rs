@@ -60,19 +60,8 @@ pub async fn delete_playlist_by_id(
     playlist_id_: &str,
     account_id_: &str,
 ) -> Result<(), DbError> {
-    // delete linked videos first to ensure database integrity
-    // TODO: use ON DELETE CASCADE
-    diesel::delete(
-        playlist_video_member.filter(
-            playlist_id
-                .eq(playlist_id_.to_string())
-                .and(playlist_video_member_account_id.eq(account_id_)),
-        ),
-    )
-    .execute(conn)
-    .await?;
-
-    diesel::delete(playlist.filter(id.eq(playlist_id_.to_string())))
+    // The composite foreign key cascades only this account's video memberships.
+    diesel::delete(playlist.filter(id.eq(playlist_id_).and(playlist_account_id.eq(account_id_))))
         .execute(conn)
         .await?;
 

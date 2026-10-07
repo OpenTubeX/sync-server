@@ -1,6 +1,7 @@
 //! Validates user-provided data to be valid (to some extent, as it only has limited info due to using YouTube's RSS feeds)
 
 use std::cmp::max;
+use std::collections::HashSet;
 
 use itertools::Itertools;
 
@@ -34,17 +35,23 @@ fn verify_image_url(image_url: &str) -> bool {
         return false;
     };
 
+    // Clients load these URLs, so do not store plaintext or exotic schemes.
+    if url.scheme() != "https" {
+        return false;
+    }
+
     let Some(host) = url.host_str() else {
         return false;
     };
 
-    for thumbnail_domain in ALLOWED_THUMBNAIL_DOMAINS {
-        if host.ends_with(thumbnail_domain) {
-            return true;
-        }
-    }
-
-    false
+    // Match on label boundaries. A plain `ends_with` would also accept
+    // attacker-registrable domains such as `evil-youtube.com`.
+    ALLOWED_THUMBNAIL_DOMAINS.iter().any(|domain| {
+        host == *domain
+            || host
+                .strip_suffix(domain)
+                .is_some_and(|prefix| prefix.ends_with('.'))
+    })
 }
 
 fn alphanumeric_words(s: &str) -> Vec<String> {
@@ -92,19 +99,64 @@ async fn is_channel_validation_required(conn: &mut DbConnection, channel: &Chann
     true
 }
 
-pub async fn validate_channel_information_if_changed(
+/// Decide which of `channels` still need to be checked against YouTube.
+///
+/// This is the only phase that needs a database connection. Callers should run
+/// it, release their connection, and only then call
+/// [`validate_channel_against_youtube`], so that a batch of slow network
+/// round-trips never occupies a pooled connection.
+///
+/// Returned indices are deduplicated by the whole channel value.
+///
+/// Deduplicating by id alone would be a validation bypass: two entries can share
+/// an id but carry different names or avatars, and the caller persists every
+/// entry. Skipping the second one would let it reach the database unvalidated.
+/// Channels are shared between accounts, so that would also let one account
+/// poison a channel's avatar for everyone.
+pub async fn channels_requiring_validation(
     conn: &mut DbConnection,
-    channel: &mut Channel,
-) -> HandlerResult<()> {
-    if !is_channel_validation_required(conn, channel).await {
-        return Ok(());
+    channels: &[Channel],
+) -> Vec<usize> {
+    let mut required = Vec::new();
+
+    for index in distinct_channel_indices(channels) {
+        if is_channel_validation_required(conn, &channels[index]).await {
+            required.push(index);
+        }
     }
 
+    required
+}
+
+/// Indices of the first occurrence of each distinct channel value.
+///
+/// Entries that are fully equal are interchangeable, so validating one covers
+/// the rest. Entries that differ in any field are kept separately.
+fn distinct_channel_indices(channels: &[Channel]) -> Vec<usize> {
+    let mut seen = HashSet::new();
+
+    channels
+        .iter()
+        .enumerate()
+        .filter(|(_, channel)| seen.insert(*channel))
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// Validate a channel against its YouTube RSS feed.
+///
+/// Deliberately takes no database connection so that callers cannot hold one
+/// across the network round-trip.
+pub async fn validate_channel_against_youtube(channel: &mut Channel) -> HandlerResult<()> {
     let rss_channel = RssChannel::fetch_from_channel_id(&channel.id)
         .await
         .map_err(|_| HandlerError::YouTubeConnectError)?;
 
-    validate_channel_information(channel.clone(), &rss_channel)
+    // Assign the result back: `validate_channel_information` replaces the name
+    // with the canonical one from the feed, and dropping it here would persist
+    // the client-supplied name instead. `validate_videos_against_youtube` does
+    // the same, so both paths normalize identically.
+    (*channel) = validate_channel_information(channel.clone(), &rss_channel)
         .map_err(|_| HandlerError::ValidationError)?;
 
     Ok(())
@@ -130,26 +182,55 @@ fn validate_channel_information(
     Ok(channel)
 }
 
-/// Requirement: all videos must be from the same channel!
-pub async fn validate_video_information_if_changed_single(
+/// Mark which videos still differ from the copy already stored, and therefore
+/// need to be checked against YouTube.
+///
+/// This is the only phase that needs a database connection. Run it, release the
+/// connection, then call [`validate_videos_against_youtube`].
+pub async fn videos_requiring_validation(
     conn: &mut DbConnection,
-    video_data: &mut CreateVideo,
-) -> HandlerResult<()> {
-    let mut video_datas = vec![video_data.clone()];
-    validate_video_information_if_changed(conn, &mut video_datas, &mut video_data.uploader).await?;
-    (*video_data) = video_datas[0].clone();
+    video_datas: &[CreateVideo],
+) -> Vec<bool> {
+    if !CONFIG.validate_submitted_metadata {
+        return vec![false; video_datas.len()];
+    }
 
-    Ok(())
+    let mut required = Vec::with_capacity(video_datas.len());
+    for video_data in video_datas {
+        // verification is only required if the video doesn't exist yet or has changed since then
+        let existing_video = get_video_by_id(conn, &video_data.id).await.ok().flatten();
+        required.push(
+            !existing_video
+                .is_some_and(|existing| std::convert::Into::<Video>::into(video_data) == existing),
+        );
+    }
+
+    required
 }
 
+/// Validate a batch of videos, all from `channel`, against the channel's RSS feed.
+///
+/// `needs_validation` comes from [`videos_requiring_validation`] and must have
+/// the same length as `video_datas`. Deliberately takes no database connection
+/// so that callers cannot hold one across the network round-trip.
+///
 /// Requirement: all videos must be from the same channel!
-pub async fn validate_video_information_if_changed(
-    conn: &mut DbConnection,
+pub async fn validate_videos_against_youtube(
     video_datas: &mut [CreateVideo],
+    needs_validation: &[bool],
     channel: &mut Channel,
 ) -> HandlerResult<()> {
     if !CONFIG.validate_submitted_metadata {
         return Ok(());
+    }
+
+    // `zip` below truncates to the shorter slice, which would silently skip
+    // validation for the tail. This gates metadata validation, so enforce the
+    // contract rather than documenting it.
+    if needs_validation.len() != video_datas.len() {
+        return Err(HandlerError::ValidationErrorWithContext(
+            "validation plan does not match the batch".to_owned(),
+        ));
     }
 
     for video in video_datas.iter() {
@@ -166,13 +247,8 @@ pub async fn validate_video_information_if_changed(
     (*channel) = validate_channel_information(channel.clone(), &channel_rss)
         .map_err(|_| HandlerError::ValidationError)?;
 
-    for video_data in video_datas.iter_mut() {
-        // verification is only required if the channel doesn't exist yet or has changed since then
-        let existing_video = get_video_by_id(conn, &video_data.id).await.ok().flatten();
-
-        if let Some(existing_video) = existing_video
-            && std::convert::Into::<Video>::into(&*video_data) == existing_video
-        {
+    for (video_data, needs_validation) in video_datas.iter_mut().zip(needs_validation) {
+        if !needs_validation {
             continue;
         }
 
@@ -283,6 +359,44 @@ mod test {
         },
     };
 
+    fn channel(id: &str, name: &str) -> Channel {
+        Channel {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            avatar: Some("https://i1.ytimg.com/vi/x/hqdefault.jpg".to_owned()),
+            verified: false,
+        }
+    }
+
+    /// Regression test: deduplicating by id alone let a second entry sharing an
+    /// id but carrying forged fields reach the database unvalidated.
+    #[test]
+    fn dedup_keeps_channels_that_share_an_id_but_differ() {
+        let channels = [
+            channel("UC_same", "Real Name"),
+            channel("UC_same", "Forged Name"),
+        ];
+
+        assert_eq!(
+            crate::validation::distinct_channel_indices(&channels),
+            vec![0, 1]
+        );
+    }
+
+    #[test]
+    fn dedup_collapses_fully_equal_channels() {
+        let channels = [
+            channel("UC_a", "Name"),
+            channel("UC_a", "Name"),
+            channel("UC_b", "Other"),
+        ];
+
+        assert_eq!(
+            crate::validation::distinct_channel_indices(&channels),
+            vec![0, 2]
+        );
+    }
+
     #[test]
     fn test_image_url_validator() {
         assert!(verify_image_url(
@@ -294,6 +408,15 @@ mod test {
         assert!(!verify_image_url(
             "https://mydomain.com/vi/hTC6Xa5TrRc/hqdefault.jpg"
         ));
+        // suffix matches that are not label boundaries must be rejected
+        assert!(!verify_image_url("https://evil-youtube.com/a.jpg"));
+        assert!(!verify_image_url("https://notytimg.com/a.jpg"));
+        assert!(!verify_image_url("https://ytimg.com.evil.net/a.jpg"));
+        // real subdomains are still accepted
+        assert!(verify_image_url("https://yt3.googleusercontent.com/a.jpg"));
+        // only https, since clients load whatever is stored here
+        assert!(!verify_image_url("http://i1.ytimg.com/vi/x/hqdefault.jpg"));
+        assert!(!verify_image_url("ftp://i1.ytimg.com/vi/x/hqdefault.jpg"));
     }
 
     #[actix_rt::test]
@@ -307,7 +430,7 @@ mod test {
                 Channel {
                     id: "UC8-Th83bH_thdKZDJCrn88g".to_string(),
                     name: "The Tonight Show Starring Jimmy Fallon".to_string(),
-                    avatar: "https://i1.ytimg.com/vi/hTC6Xa5TrRc/hqdefault.jpg".to_string(),
+                    avatar: Some("https://i1.ytimg.com/vi/hTC6Xa5TrRc/hqdefault.jpg".to_string(),),
                     verified: true,
                 },
                 &channel_rss
@@ -320,7 +443,9 @@ mod test {
                 Channel {
                     id: "UC8-Th83bH_thdKZDJCrn88g".to_string(),
                     name: "The Tonight Show Starring Jimmy Fallon".to_string(),
-                    avatar: "https://i1.example.com/vi/hTC6Xa5TrRc/hqdefault.jpg".to_string(),
+                    avatar: Some(
+                        "https://i1.example.com/vi/hTC6Xa5TrRc/hqdefault.jpg".to_string(),
+                    ),
                     verified: true,
                 },
                 &channel_rss
@@ -333,7 +458,9 @@ mod test {
                 Channel {
                     id: "UC8-Th83bH_thdKZDJCrn88g".to_string(),
                     name: "Wrong channel name".to_string(),
-                    avatar: "https://i1.example.com/vi/hTC6Xa5TrRc/hqdefault.jpg".to_string(),
+                    avatar: Some(
+                        "https://i1.example.com/vi/hTC6Xa5TrRc/hqdefault.jpg".to_string(),
+                    ),
                     verified: true,
                 },
                 &channel_rss
@@ -354,7 +481,7 @@ mod test {
                 Channel {
                     id: "UCjp_3PEaOau_nT_3vnqKIvg".to_string(),
                     name: "Junya Official Channel".to_string(),
-                    avatar: "https://yt3.googleusercontent.com/ytc/AIdro_mFt9iiVlgxD1gBW74I1o6H8xFtOg5AwqPj2_1JKHJ4UJg=s160-c-k-c0x00ffffff-no-rj".to_string(),
+                    avatar: Some("https://yt3.googleusercontent.com/ytc/AIdro_mFt9iiVlgxD1gBW74I1o6H8xFtOg5AwqPj2_1JKHJ4UJg=s160-c-k-c0x00ffffff-no-rj".to_string()),
                     verified: true,
                 },
                 &channel_rss
@@ -374,7 +501,7 @@ mod test {
             uploader: Channel {
                 id: "UCWnQYRWgTbsLTDOAVc3uzRg".to_string(),
                 name: "KottiXD".to_string(),
-                avatar: "https://yt3.googleusercontent.com/ytc/AIdro_lBXTw2HqumabqUMrMcWlB5BVUa-bDCP1YQ0Jwf89C6RMY=s160-c-k-c0x00ffffff-no-rj".to_string(),
+                avatar: Some("https://yt3.googleusercontent.com/ytc/AIdro_lBXTw2HqumabqUMrMcWlB5BVUa-bDCP1YQ0Jwf89C6RMY=s160-c-k-c0x00ffffff-no-rj".to_string()),
                 verified: false,
             },
         };

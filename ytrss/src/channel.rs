@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
-use crate::{YOUTUBE_BASE_URL, YouTubeError, YouTubeResult, video::RssVideo};
+use crate::{YouTubeError, YouTubeResult, video::RssVideo};
 
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -18,16 +18,7 @@ pub(crate) struct RssChannelAuthor {
 
 impl RssChannel {
     pub async fn fetch_from_channel_id(channel_id: &str) -> YouTubeResult<Self> {
-        let feed_url = format!(
-            "{}/feeds/videos.xml?channel_id={}",
-            YOUTUBE_BASE_URL, channel_id
-        );
-        let response_body = reqwest::get(feed_url)
-            .await
-            .map_err(|_err| YouTubeError::ConnectionError)?
-            .text()
-            .await
-            .map_err(|_err| YouTubeError::ConnectionError)?;
+        let response_body = crate::fetch_feed("channel_id", channel_id).await?;
 
         serde_roxmltree::from_str(&response_body).map_err(YouTubeError::ParserError)
     }

@@ -19,9 +19,47 @@ use super::schema::*;
 #[diesel(table_name = account)]
 pub struct Account {
     pub id: String,
+    // Never serialize credential material into a response body. Deserialization
+    // is kept so the struct still round-trips through diesel.
+    #[serde(skip_serializing)]
     pub name_hash: String,
+    #[serde(skip_serializing)]
     pub password_hash: Option<String>,
+    #[serde(skip_serializing)]
     pub oidc_sub: Option<String>,
+    #[serde(skip_serializing)]
+    pub legacy_tokens_enabled: bool,
+    #[serde(skip_serializing)]
+    pub session_generation: i64,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    Queryable,
+    Selectable,
+    Insertable,
+    AsChangeset,
+    ToSchema,
+    Eq,
+    PartialEq,
+)]
+#[diesel(belongs_to(Account))]
+#[diesel(table_name = account_session)]
+pub struct AccountSession {
+    pub id: String,
+    pub account_id: String,
+    pub device_id: String,
+    pub encrypted_device_info: Option<String>,
+    pub created_at: i64,
+    pub last_active_at: i64,
+    pub expires_at: i64,
+    pub revoked_at: Option<i64>,
+    pub legacy: bool,
+    pub generation: i64,
+    pub pending_pairing: bool,
 }
 
 #[derive(
@@ -57,6 +95,33 @@ pub struct Subscription {
     #[serde(skip)]
     pub account_id: String,
     pub channel_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Queryable, Selectable, Insertable, ToSchema)]
+#[diesel(primary_key(account_id, collection))]
+#[diesel(belongs_to(Account))]
+#[diesel(table_name = encrypted_sync)]
+pub struct EncryptedSync {
+    pub account_id: String,
+    pub collection: String,
+    pub revision: i64,
+    pub payload: String,
+}
+
+#[derive(Debug, Clone, Queryable, Selectable, Insertable, Eq, PartialEq)]
+#[diesel(belongs_to(Account))]
+#[diesel(table_name = pairing_session)]
+pub struct PairingSession {
+    pub id: String,
+    pub version: i16,
+    pub account_id: Option<String>,
+    pub recipient_public_key: String,
+    pub recipient_device_id: String,
+    pub recipient_device_name: String,
+    pub recipient_token_hash: String,
+    pub approving_device_id: Option<String>,
+    pub encrypted_payload: Option<String>,
+    pub expires_at: i64,
 }
 
 #[derive(

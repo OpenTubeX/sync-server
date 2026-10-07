@@ -11,9 +11,12 @@ use utoipa_actix_web::scope::Scope;
 
 use crate::{models::Account, oidc::OidcError};
 
+pub mod encrypted_sync;
 pub mod health;
+pub mod pairing;
 pub mod playlist_bookmarks;
 pub mod playlists;
+pub mod session;
 pub mod subscriptions;
 pub mod user;
 pub mod watch_history;
@@ -56,6 +59,28 @@ pub enum HandlerError {
     ValidationError,
     #[error("provided metadata seems to be wrong: {0}")]
     ValidationErrorWithContext(String),
+    #[error("encrypted sync collection changed; retry with the latest revision")]
+    EncryptedSyncConflict,
+    #[error("encrypted sync collection is too large")]
+    EncryptedSyncTooLarge,
+    #[error("too many items in one request (max {0})")]
+    BulkRequestTooLarge(usize),
+    #[error("too many requests; slow down and try again later")]
+    TooManyRequests,
+    #[error("account storage quota exceeded")]
+    StorageQuotaExceeded,
+    #[error("encrypted sync account storage quota exceeded")]
+    EncryptedSyncQuotaExceeded,
+    #[error("this account requires the encrypted sync endpoint")]
+    EncryptedSyncRequired,
+    #[error("pairing session not found or expired")]
+    PairingNotFound,
+    #[error("account session not found or expired")]
+    AccountSessionNotFound,
+    #[error("pairing session has already changed state")]
+    PairingConflict,
+    #[error("too many active pairing sessions")]
+    PairingLimitExceeded,
     #[error("failed to load data from YouTube")]
     YouTubeConnectError,
     #[error("{0}")]
@@ -85,6 +110,17 @@ impl ResponseError for HandlerError {
             Self::InternalDatabaseErrorWithContext(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ValidationError => StatusCode::BAD_REQUEST,
             Self::ValidationErrorWithContext(_) => StatusCode::BAD_REQUEST,
+            Self::EncryptedSyncConflict => StatusCode::CONFLICT,
+            Self::EncryptedSyncTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::BulkRequestTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
+            Self::StorageQuotaExceeded => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::EncryptedSyncQuotaExceeded => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::EncryptedSyncRequired => StatusCode::CONFLICT,
+            Self::PairingNotFound => StatusCode::NOT_FOUND,
+            Self::AccountSessionNotFound => StatusCode::NOT_FOUND,
+            Self::PairingConflict => StatusCode::CONFLICT,
+            Self::PairingLimitExceeded => StatusCode::TOO_MANY_REQUESTS,
             Self::YouTubeConnectError => StatusCode::INTERNAL_SERVER_ERROR,
             Self::OidcError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::PasswordLoginDisabledForAccount => StatusCode::BAD_REQUEST,
@@ -93,6 +129,50 @@ impl ResponseError for HandlerError {
 }
 
 pub type HandlerResult<T> = Result<T, HandlerError>;
+
+/// Upper bound on how many items one bulk request may carry.
+///
+/// Validation can issue a YouTube round-trip per distinct channel, so an
+/// unbounded batch lets a single request occupy a worker for an unbounded time.
+pub const MAX_BULK_ITEMS: usize = 1000;
+
+pub fn check_bulk_size(len: usize) -> HandlerResult<()> {
+    if len > MAX_BULK_ITEMS {
+        return Err(HandlerError::BulkRequestTooLarge(MAX_BULK_ITEMS));
+    }
+
+    Ok(())
+}
+
+/// Fail fast when an account is *already* over its quota.
+///
+/// Deliberately does not charge for the incoming batch. All the bulk write paths
+/// are upserts, so a client re-syncing data it already stored adds no rows;
+/// charging the batch up front would reject those re-syncs even though they
+/// change nothing, and would do so precisely when an account is near its limit.
+/// [`check_stored_rows`] does the authoritative check after the writes.
+pub fn check_already_over_quota(stored_rows: i64) -> HandlerResult<()> {
+    check_stored_rows(stored_rows)
+}
+
+/// Authoritative quota check, for use after the writes inside a transaction.
+///
+/// Counting the rows that actually exist is exact regardless of how many of the
+/// incoming entries were updates rather than inserts. Returning an error from
+/// inside the transaction rolls the writes back.
+pub fn check_stored_rows(stored_rows: i64) -> HandlerResult<()> {
+    if crate::database::quota::exceeds_row_quota(stored_rows) {
+        return Err(HandlerError::StorageQuotaExceeded);
+    }
+
+    Ok(())
+}
+
+impl From<diesel::result::Error> for HandlerError {
+    fn from(error: diesel::result::Error) -> Self {
+        Self::InternalDatabaseErrorWithContext(error.to_string())
+    }
+}
 
 // https://github.com/actix/actix-web/discussions/3074
 pub trait ScopedHandler {
@@ -118,6 +198,22 @@ impl FromRequest for Account {
         Box::pin(
             async move { account.ok_or(actix_web::error::ErrorForbidden("missing account info")) },
         )
+    }
+}
+
+impl FromRequest for crate::models::AccountSession {
+    type Error = actix_web::Error;
+
+    type Future = Pin<Box<dyn Future<Output = Result<Self, Self::Error>>>>;
+
+    fn from_request(req: &HttpRequest, _payload: &mut actix_web::dev::Payload) -> Self::Future {
+        let extensions = req.extensions();
+        let session = extensions.get::<crate::models::AccountSession>().cloned();
+        Box::pin(async move {
+            session.ok_or(actix_web::error::ErrorForbidden(
+                "missing account session info",
+            ))
+        })
     }
 }
 

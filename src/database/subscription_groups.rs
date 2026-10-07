@@ -87,7 +87,8 @@ pub async fn update_existing_subscription_group(
 ) -> Result<SubscriptionGroup, DbError> {
     diesel::update(subscription_group)
         .filter(id.eq(subscription_group_.id.clone()))
-        .set(subscription_group_)
+        .filter(account_id.eq(&subscription_group_.account_id))
+        .set(title.eq(&subscription_group_.title))
         .returning(SubscriptionGroup::as_returning())
         .get_result(conn)
         .await
@@ -98,13 +99,7 @@ pub async fn delete_subscription_group_by_id(
     subscription_group_id_: &str,
     account_id_: &str,
 ) -> Result<(), DbError> {
-    // delete all linked channels first to ensure database integrity
-    // TODO: use ON DELETE CASCADE
-    diesel::delete(subscription_group_member)
-        .filter(subscription_group_id.eq(subscription_group_id_))
-        .execute(conn)
-        .await?;
-
+    // Memberships cascade only after an owned group has been deleted.
     diesel::delete(subscription_group)
         .filter(
             id.eq(subscription_group_id_)

@@ -1,9 +1,11 @@
 use actix_web::{HttpResponse, Responder, delete, get, middleware::from_fn, patch, post, put, web};
+use diesel_async::AsyncConnection;
 use utoipa_actix_web::scope;
 
 use crate::{
     DbConnection, WebData,
     database::{
+        quota::count_subscriptions,
         subscription::{
             add_subscription_by_account_id, get_subscription_channel_by_account_id,
             get_subscriptions_by_account_id, remove_subscription_by_account_id,
@@ -18,9 +20,12 @@ use crate::{
     },
     dto::ExtendedSubscriptionGroup,
     get_db_conn,
-    handlers::{HandlerError, HandlerResult, ScopedHandler, user::auth_middleware},
+    handlers::{
+        HandlerError, HandlerResult, ScopedHandler, check_already_over_quota, check_bulk_size,
+        check_stored_rows, user::auth_middleware,
+    },
     models::{Account, Channel, SubscriptionGroup},
-    validation::validate_channel_information_if_changed,
+    validation::{channels_requiring_validation, validate_channel_against_youtube},
 };
 
 pub struct SubscriptionsHandler {}
@@ -47,6 +52,7 @@ impl ScopedHandler for SubscriptionsHandler {
                     .service(remove_from_subscription_group),
             )
             .service(get_subscriptions)
+            .service(subscribe_bulk)
             .service(get_subscription)
             .service(subscribe)
             .service(unsubscribe)
@@ -63,6 +69,52 @@ async fn get_subscriptions(account: Account, pool: WebData) -> HandlerResult<imp
         .map_err(|_| HandlerError::InternalDatabaseError)?;
 
     Ok(HttpResponse::Ok().json(subscriptions))
+}
+
+#[utoipa::path(responses((status = OK)), security(("api_jwt_token" = [])))]
+#[put("/bulk")]
+async fn subscribe_bulk(
+    account: Account,
+    pool: WebData,
+    channels: web::Json<Vec<Channel>>,
+) -> HandlerResult<impl Responder> {
+    let mut channels = channels.into_inner();
+    check_bulk_size(channels.len())?;
+
+    // Work out what needs validating, then release the connection before the
+    // network round-trips so that a slow batch cannot hold one for minutes.
+    let pending = {
+        let mut conn = get_db_conn!(pool);
+        check_already_over_quota(
+            count_subscriptions(&mut conn, &account.id)
+                .await
+                .map_err(|_| HandlerError::InternalDatabaseError)?,
+        )?;
+        channels_requiring_validation(&mut conn, &channels).await
+    };
+    for index in pending {
+        validate_channel_against_youtube(&mut channels[index]).await?;
+    }
+
+    let mut conn = get_db_conn!(pool);
+    conn.transaction::<_, HandlerError, _>(async |conn| {
+        for channel in &channels {
+            add_subscription_by_account_id(conn, channel, &account.id).await?;
+        }
+
+        // Authoritative check on the rows that now exist. Subscriptions are
+        // upserts, so counting afterwards is the only way to charge for what
+        // was actually added; an error here rolls the batch back.
+        check_stored_rows(
+            count_subscriptions(conn, &account.id)
+                .await
+                .map_err(|_| HandlerError::InternalDatabaseError)?,
+        )?;
+        Ok(())
+    })
+    .await?;
+
+    Ok(HttpResponse::Ok())
 }
 
 #[utoipa::path(responses((status = OK, body = Channel)), security(("api_jwt_token" = [])))]
@@ -92,18 +144,42 @@ async fn subscribe(
     pool: WebData,
     channel: web::Json<Channel>,
 ) -> HandlerResult<impl Responder> {
-    let mut conn = get_db_conn!(pool);
-
     let mut channel = channel.into_inner();
-    // verify that the provided information is valid
-    validate_channel_information_if_changed(&mut conn, &mut channel).await?;
 
-    match add_subscription_by_account_id(&mut conn, &channel, &account.id).await {
-        Ok(_) => Ok(HttpResponse::Ok()),
-        Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
-            err.to_string(),
-        )),
+    // verify that the provided information is valid, without holding a
+    // connection across the YouTube round-trip
+    let needs_validation = {
+        let mut conn = get_db_conn!(pool);
+        check_already_over_quota(
+            count_subscriptions(&mut conn, &account.id)
+                .await
+                .map_err(|_| HandlerError::InternalDatabaseError)?,
+        )?;
+        !channels_requiring_validation(&mut conn, std::slice::from_ref(&channel))
+            .await
+            .is_empty()
+    };
+    if needs_validation {
+        validate_channel_against_youtube(&mut channel).await?;
     }
+
+    let mut conn = get_db_conn!(pool);
+    // Mirrors the bulk path: without an authoritative post-write check inside a
+    // transaction, concurrent single subscribes each see an under-quota count and
+    // can together push the account past the limit.
+    conn.transaction::<_, HandlerError, _>(async |conn| {
+        let (channel, account_id) = (&channel, &account.id);
+        add_subscription_by_account_id(conn, channel, account_id).await?;
+        check_stored_rows(
+            count_subscriptions(conn, account_id)
+                .await
+                .map_err(|_| HandlerError::InternalDatabaseError)?,
+        )?;
+        Ok(())
+    })
+    .await?;
+
+    Ok(HttpResponse::Ok())
 }
 
 #[utoipa::path(responses((status = OK)), security(("api_jwt_token" = [])))]
@@ -213,6 +289,7 @@ async fn update_subscription_group(
 
     match update_existing_subscription_group(&mut conn, subscription_group).await {
         Ok(group) => Ok(HttpResponse::Ok().json(group)),
+        Err(diesel::result::Error::NotFound) => Err(HandlerError::SubscriptionGroupNotFound),
         Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
             err.to_string(),
         )),
