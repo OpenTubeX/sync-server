@@ -160,31 +160,40 @@ async fn cors_preflights_allow_client_headers_without_authentication() {
                     .unwrap(),
                 "*"
             );
-            let allowed_methods = response
+            let mut allowed_methods = response
                 .headers()
                 .get("Access-Control-Allow-Methods")
                 .unwrap()
                 .to_str()
-                .unwrap();
-            assert!(
-                allowed_methods
-                    .split(',')
-                    .any(|allowed| allowed.trim() == method)
+                .unwrap()
+                .split(',')
+                .map(str::trim)
+                .collect::<Vec<_>>();
+            allowed_methods.sort_unstable();
+            assert_eq!(
+                allowed_methods,
+                ["DELETE", "GET", "HEAD", "PATCH", "POST", "PUT"]
             );
-            let allowed_headers = response
+            let mut allowed_headers = response
                 .headers()
                 .get("Access-Control-Allow-Headers")
                 .unwrap()
                 .to_str()
-                .unwrap();
-            for header in headers.split(',') {
-                assert!(
-                    allowed_headers
-                        .split(',')
-                        .any(|allowed| allowed.trim().eq_ignore_ascii_case(header)),
-                    "missing {header}"
-                );
-            }
+                .unwrap()
+                .split(',')
+                .map(|header| header.trim().to_ascii_lowercase())
+                .collect::<Vec<_>>();
+            allowed_headers.sort_unstable();
+            assert_eq!(
+                allowed_headers,
+                [
+                    "accept",
+                    "authorization",
+                    "content-type",
+                    "opentubex-client-version",
+                    "x-pairing-token",
+                ]
+            );
             assert_eq!(
                 response.headers().get("Access-Control-Max-Age").unwrap(),
                 "3600"
