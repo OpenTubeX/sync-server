@@ -103,6 +103,249 @@ async fn response_snapshot(
 }
 
 #[actix_web::test]
+async fn cors_preflights_allow_client_headers_without_authentication() {
+    let (app, _) = App::new()
+        .into_utoipa_app()
+        .configure(configure_api_routes)
+        .split_for_parts();
+    let app = test::init_service(
+        app.service(HealthHandler::get_service())
+            .wrap(actix_web::middleware::from_fn(crate::cors::cors_middleware)),
+    )
+    .await;
+
+    for origin in ["null", "https://client.example", "capacitor://localhost"] {
+        for (uri, method, headers) in [
+            ("/health", "GET", "opentubex-client-version"),
+            (
+                "/v1/encrypted_sync/settings",
+                "PUT",
+                "authorization,content-type,opentubex-client-version",
+            ),
+            (
+                "/encrypted_sync/settings",
+                "PUT",
+                "authorization,content-type,opentubex-client-version",
+            ),
+            (
+                "/v1/pairing/test",
+                "GET",
+                "x-pairing-token,opentubex-client-version",
+            ),
+            (
+                "/v1/account/sessions/test",
+                "PATCH",
+                "authorization,content-type",
+            ),
+            ("/account/delete", "DELETE", "authorization"),
+            (
+                "/account/login",
+                "POST",
+                "content-type,opentubex-client-version",
+            ),
+        ] {
+            let request = test::TestRequest::default()
+                .method(Method::OPTIONS)
+                .uri(uri)
+                .insert_header(("Origin", origin))
+                .insert_header(("Access-Control-Request-Method", method))
+                .insert_header(("Access-Control-Request-Headers", headers))
+                .to_request();
+            let response = test::call_service(&app, request).await;
+            assert_eq!(response.status(), StatusCode::NO_CONTENT, "OPTIONS {uri}");
+            assert_eq!(
+                response
+                    .headers()
+                    .get("Access-Control-Allow-Origin")
+                    .unwrap(),
+                "*"
+            );
+            let allowed_methods = response
+                .headers()
+                .get("Access-Control-Allow-Methods")
+                .unwrap()
+                .to_str()
+                .unwrap();
+            assert!(
+                allowed_methods
+                    .split(',')
+                    .any(|allowed| allowed.trim() == method)
+            );
+            let allowed_headers = response
+                .headers()
+                .get("Access-Control-Allow-Headers")
+                .unwrap()
+                .to_str()
+                .unwrap();
+            for header in headers.split(',') {
+                assert!(
+                    allowed_headers
+                        .split(',')
+                        .any(|allowed| allowed.trim().eq_ignore_ascii_case(header)),
+                    "missing {header}"
+                );
+            }
+            assert_eq!(
+                response.headers().get("Access-Control-Max-Age").unwrap(),
+                "3600"
+            );
+            assert!(
+                !response
+                    .headers()
+                    .contains_key("Access-Control-Allow-Credentials")
+            );
+            assert!(test::read_body(response).await.is_empty());
+        }
+    }
+}
+
+#[actix_web::test]
+async fn cors_rejects_unsupported_preflights_and_preserves_plain_options() {
+    let app = test::init_service(
+        App::new()
+            .service(HealthHandler::get_service())
+            .wrap(actix_web::middleware::from_fn(crate::cors::cors_middleware)),
+    )
+    .await;
+    for (method, headers, expected) in [
+        (Some("GET"), None, StatusCode::NO_CONTENT),
+        (Some("HEAD"), Some("Accept"), StatusCode::NO_CONTENT),
+        (
+            Some("GET"),
+            Some("OpenTubeX-Client-Version, AUTHORIZATION"),
+            StatusCode::NO_CONTENT,
+        ),
+        (None, None, StatusCode::BAD_REQUEST),
+        (Some("TRACE"), None, StatusCode::BAD_REQUEST),
+        (Some("get"), None, StatusCode::BAD_REQUEST),
+        (Some("GET"), Some("x-unsupported"), StatusCode::BAD_REQUEST),
+        (
+            Some("GET"),
+            Some("authorization,x-unsupported"),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let mut request = test::TestRequest::default()
+            .method(Method::OPTIONS)
+            .uri("/health")
+            .insert_header(("Origin", "https://client.example"));
+        if let Some(method) = method {
+            request = request.insert_header(("Access-Control-Request-Method", method));
+        }
+        if let Some(headers) = headers {
+            request = request.insert_header(("Access-Control-Request-Headers", headers));
+        }
+        let response = test::call_service(&app, request.to_request()).await;
+        assert_eq!(response.status(), expected, "{method:?}, {headers:?}");
+        if expected == StatusCode::BAD_REQUEST {
+            assert!(
+                !response
+                    .headers()
+                    .contains_key("Access-Control-Allow-Origin")
+            );
+        }
+    }
+    let request = test::TestRequest::default()
+        .method(Method::OPTIONS)
+        .uri("/health")
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, request).await.status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[actix_web::test]
+async fn cors_headers_cover_successes_and_api_errors_without_bypassing_auth() {
+    let pool = pool().await;
+    let token = seed_account(&pool).await;
+    let limiter = web::Data::new(RateLimiter::default());
+    let peer: std::net::SocketAddr = "192.0.2.1:1234".parse().unwrap();
+    for _ in 0..crate::rate_limit::MAX_REQUESTS_PER_WINDOW {
+        assert!(limiter.check(peer.ip()));
+    }
+    let (app, _) = App::new()
+        .into_utoipa_app()
+        .app_data(web::Data::new(pool))
+        .app_data(limiter)
+        .configure(configure_api_routes)
+        .split_for_parts();
+    let app = test::init_service(
+        app.service(HealthHandler::get_service())
+            .wrap(actix_web::middleware::from_fn(crate::cors::cors_middleware)),
+    )
+    .await;
+    for (uri, authorization, expected) in [
+        ("/health", None, StatusCode::OK),
+        (
+            "/v1/encrypted_sync/settings",
+            None,
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            "/encrypted_sync/settings",
+            Some("invalid-token"),
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            "/v1/encrypted_sync/settings",
+            Some(token.as_str()),
+            StatusCode::OK,
+        ),
+        (
+            "/encrypted_sync/settings",
+            Some(token.as_str()),
+            StatusCode::OK,
+        ),
+        ("/not-an-endpoint", None, StatusCode::NOT_FOUND),
+    ] {
+        let mut request = test::TestRequest::get()
+            .uri(uri)
+            .insert_header(("Origin", "https://client.example"))
+            .insert_header(("OpenTubeX-Client-Version", "0.36.0"));
+        if let Some(authorization) = authorization {
+            request = request.insert_header(("Authorization", authorization));
+        }
+        let response = test::call_service(&app, request.to_request()).await;
+        assert_eq!(response.status(), expected, "{uri}");
+        assert_eq!(
+            response
+                .headers()
+                .get("Access-Control-Allow-Origin")
+                .unwrap(),
+            "*"
+        );
+        assert!(
+            !response
+                .headers()
+                .contains_key("Access-Control-Allow-Credentials")
+        );
+    }
+    let request = test::TestRequest::post()
+        .uri("/account/login")
+        .peer_addr(peer)
+        .insert_header(("Origin", "https://client.example"))
+        .set_json(json!({ "name": "test", "password": "wrong-password" }))
+        .to_request();
+    let response = test::call_service(&app, request).await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        response
+            .headers()
+            .get("Access-Control-Allow-Origin")
+            .unwrap(),
+        "*"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("Access-Control-Expose-Headers")
+            .unwrap(),
+        "Allow, Retry-After"
+    );
+}
+
+#[actix_web::test]
 async fn removed_playback_speed_routes_return_not_found() {
     let pool = pool().await;
     let token = seed_account(&pool).await;

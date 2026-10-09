@@ -34,6 +34,7 @@ use crate::{
 
 mod auth;
 mod config;
+mod cors;
 mod database;
 mod dto;
 mod handlers;
@@ -122,6 +123,7 @@ async fn main() -> io::Result<()> {
         // docs service must be registered before health handler!
         app.service(Scalar::with_url("/docs", api))
             .service(HealthHandler::get_service())
+            .wrap(middleware::from_fn(cors::cors_middleware))
             .wrap(access_logger(
                 CONFIG.trust_forwarded_for,
                 CONFIG.trusted_proxy_hops,

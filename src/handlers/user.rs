@@ -1,9 +1,10 @@
-use actix_web::body::MessageBody;
+use actix_web::body::{BoxBody, MessageBody};
 use actix_web::dev::{ServiceFactory, ServiceRequest, ServiceResponse};
 use actix_web::middleware::Next;
 use actix_web::web::Redirect;
 use actix_web::{
-    HttpMessage, HttpRequest, HttpResponse, Responder, delete, get, patch, post, put, web,
+    HttpMessage, HttpRequest, HttpResponse, Responder, ResponseError, delete, get, patch, post,
+    put, web,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -497,13 +498,16 @@ async fn change_password(
 /// `trust_forwarded_for` switches to the forwarded address instead.
 pub async fn rate_limit_middleware(
     req: ServiceRequest,
-    next: Next<impl MessageBody>,
-) -> Result<ServiceResponse<impl MessageBody>, actix_web::Error> {
+    next: Next<impl MessageBody + 'static>,
+) -> Result<ServiceResponse<BoxBody>, actix_web::Error> {
     // Listing, renaming, and revoking sessions already require a valid token.
     // Counting those ordinary management requests against the credential-attempt
     // budget can lock a signed-in user out midway through reviewing devices.
     if req.path().ends_with("/account/sessions") || req.path().contains("/account/sessions/") {
-        return next.call(req).await;
+        return next
+            .call(req)
+            .await
+            .map(ServiceResponse::map_into_boxed_body);
     }
 
     let limiter: Option<&web::Data<RateLimiter>> = req.app_data();
@@ -516,10 +520,14 @@ pub async fn rate_limit_middleware(
         )
         && !limiter.check(client)
     {
-        return Err(HandlerError::TooManyRequests.into());
+        // Return the HTTP response through outer middleware so CORS headers
+        // also cover rate-limit errors.
+        return Ok(req.into_response(HandlerError::TooManyRequests.error_response()));
     }
 
-    next.call(req).await
+    next.call(req)
+        .await
+        .map(ServiceResponse::map_into_boxed_body)
 }
 
 /// Client address shared by rate limiting and access logging.
@@ -622,8 +630,19 @@ pub(crate) async fn authenticate_account(
 /// Middleware that ensures that the account is authenticated.
 pub async fn auth_middleware(
     req: ServiceRequest,
-    next: Next<impl MessageBody>,
-) -> Result<ServiceResponse<impl MessageBody>, actix_web::Error> {
+    next: Next<impl MessageBody + 'static>,
+) -> Result<ServiceResponse<BoxBody>, actix_web::Error> {
+    // Render authentication errors before returning through outer middleware
+    // so browsers receive the same CORS headers as successful API responses.
+    if let Err(error) = authorize_request(&req).await {
+        return Ok(req.into_response(error.error_response()));
+    }
+    next.call(req)
+        .await
+        .map(ServiceResponse::map_into_boxed_body)
+}
+
+async fn authorize_request(req: &ServiceRequest) -> Result<(), actix_web::Error> {
     let pool: WebData = req.app_data().cloned().unwrap();
     let authenticated = authenticate_session(req.request(), &pool).await?;
     let account = authenticated.account;
@@ -655,7 +674,7 @@ pub async fn auth_middleware(
     req.extensions_mut().insert(account);
     req.extensions_mut().insert(session);
 
-    next.call(req).await
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1089,8 +1108,6 @@ mod tests {
                 .uri("/t/ping")
                 .peer_addr(peer)
                 .to_request();
-            // the middleware signals rejection with an error, which actix renders
-            // through `ResponseError` in a real server
             statuses.push(match test::try_call_service(&app, req).await {
                 Ok(response) => response.status(),
                 Err(error) => error.as_response_error().status_code(),
