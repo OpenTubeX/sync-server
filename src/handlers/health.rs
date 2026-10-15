@@ -3,7 +3,7 @@ use utoipa_actix_web::scope;
 
 use crate::{
     CONFIG,
-    dto::{ExtendedMetaResponse, LibreTubeApiMetaResponse, MetaResponse},
+    dto::{MetaResponse, MetaResponseApi, MetaResponseCapabilities},
     handlers::{HandlerResult, ScopedHandler},
 };
 
@@ -37,11 +37,11 @@ async fn health_state() -> impl Responder {
 #[get("/meta")]
 async fn server_metainfo() -> HandlerResult<impl Responder> {
     Ok(HttpResponse::Ok().json(MetaResponse {
-        api: LibreTubeApiMetaResponse {
+        api: MetaResponseApi {
             base: env!("CARGO_PKG_VERSION").into(),
         },
-        extras: ExtendedMetaResponse {
-            version: env!("CARGO_PKG_VERSION").into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+        capabilities: MetaResponseCapabilities {
             oidc: CONFIG.oidc.is_some(),
         },
     }))

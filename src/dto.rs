@@ -176,19 +176,19 @@ pub struct JwtClaims {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct MetaResponse {
-    pub api: LibreTubeApiMetaResponse,
+    pub api: MetaResponseApi,
+    pub version: String,
     #[serde(flatten)]
-    pub extras: ExtendedMetaResponse,
+    pub capabilities: MetaResponseCapabilities,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct LibreTubeApiMetaResponse {
+pub struct MetaResponseApi {
     #[serde(rename = "libretube-sync")]
     pub base: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct ExtendedMetaResponse {
-    pub version: String,
+pub struct MetaResponseCapabilities {
     pub oidc: bool,
 }
