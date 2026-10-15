@@ -62,6 +62,8 @@ pub enum HandlerError {
     OidcError(OidcError),
     #[error("account doesn't support logging in via password")]
     PasswordLoginDisabledForAccount,
+    #[error("oidc users cannot login via password")]
+    OidcPasswordChangeForbidden,
 }
 
 impl ResponseError for HandlerError {
@@ -88,6 +90,7 @@ impl ResponseError for HandlerError {
             Self::YouTubeConnectError => StatusCode::INTERNAL_SERVER_ERROR,
             Self::OidcError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::PasswordLoginDisabledForAccount => StatusCode::BAD_REQUEST,
+            Self::OidcPasswordChangeForbidden => StatusCode::FORBIDDEN,
         }
     }
 }

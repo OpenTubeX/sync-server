@@ -2,7 +2,7 @@ use actix_web::body::MessageBody;
 use actix_web::dev::{ServiceFactory, ServiceRequest, ServiceResponse};
 use actix_web::middleware::Next;
 use actix_web::web::Redirect;
-use actix_web::{HttpMessage, HttpRequest, HttpResponse, Responder, delete, get, post, web};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, Responder, delete, get, patch, post, web};
 use diesel::result::DatabaseErrorKind;
 use serde::Deserialize;
 use utoipa_actix_web::scope;
@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::auth::{generate_jwt, hash_accountname, hash_password, verify_jwt, verify_password};
 use crate::database::account::{
     delete_existing_account, delete_existing_account_by_oidc_sub, find_account_by_id,
-    find_account_by_name_hash, insert_new_account,
+    find_account_by_name_hash, insert_new_account, update_account,
 };
 use crate::dto::LoginResponse;
 use crate::handlers::{HandlerError, HandlerResult, ScopedHandler};
@@ -50,9 +50,19 @@ impl ScopedHandler for UserHandler {
         s.service(
             scope::scope("")
                 .wrap(actix_web::middleware::from_fn(auth_middleware))
+                .service(change_password)
                 .service(delete_account),
         )
     }
+}
+
+fn validate_password_strength(password: &str) -> HandlerResult<()> {
+    let password_length = password.len();
+    if password_length < MIN_PASSWORD_LENGTH {
+        return Err(HandlerError::PasswordTooShort);
+    }
+
+    Ok(())
 }
 
 #[utoipa::path(responses((status = OK, body = LoginResponse)))]
@@ -70,12 +80,7 @@ async fn register_account(
         return Err(HandlerError::InvalidCredentials);
     }
 
-    let mut conn = get_db_conn!(pool);
-
-    let password_length = form.password.len();
-    if password_length < MIN_PASSWORD_LENGTH {
-        return Err(HandlerError::PasswordTooShort);
-    }
+    validate_password_strength(&form.password)?;
 
     let account = models::Account {
         id: Uuid::now_v7().to_string(),
@@ -84,6 +89,7 @@ async fn register_account(
         oidc_sub: None,
     };
 
+    let mut conn = get_db_conn!(pool);
     let account = insert_new_account(&mut conn, &account)
         .await
         .map_err(|err| match err {
@@ -134,6 +140,33 @@ async fn login_account(
             let resp = LoginResponse { jwt };
             Ok(HttpResponse::Ok().json(resp))
         }
+        Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
+            err.to_string(),
+        )),
+    }
+}
+
+#[utoipa::path(responses((status = OK)))]
+#[patch("/password")]
+async fn change_password(
+    mut account: Account,
+    pool: WebData,
+    form: web::Json<dto::ChangePassword>,
+) -> HandlerResult<impl Responder> {
+    let mut conn = get_db_conn!(pool);
+
+    let Some(old_password_hash) = account.password_hash else {
+        return Err(HandlerError::OidcPasswordChangeForbidden);
+    };
+    if !verify_password(&form.old_password, &old_password_hash) {
+        return Err(HandlerError::InvalidCredentials);
+    }
+
+    validate_password_strength(&form.new_password)?;
+
+    account.password_hash = Some(hash_password(&form.new_password));
+    match update_account(&mut conn, &account).await {
+        Ok(_) => Ok(HttpResponse::Ok()),
         Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
             err.to_string(),
         )),

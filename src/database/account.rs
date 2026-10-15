@@ -48,6 +48,20 @@ pub async fn insert_new_account(
     Ok(created_account)
 }
 
+pub async fn update_account(
+    conn: &mut DbConnection,
+    account_: &Account,
+) -> Result<models::Account, DbError> {
+    let update_account = diesel::update(account)
+        .filter(id.eq(account_.id.to_string()))
+        .set(account_)
+        .returning(models::Account::as_returning())
+        .get_result(conn)
+        .await?;
+
+    Ok(update_account)
+}
+
 pub async fn delete_existing_account(
     conn: &mut DbConnection,
     account_id: &str, // prevent collision with db column imported inside the function

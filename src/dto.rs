@@ -23,6 +23,12 @@ pub struct LoginResponse {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct ChangePassword {
+    pub old_password: String,
+    pub new_password: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct DeleteUser {
     pub password: String,
 }
