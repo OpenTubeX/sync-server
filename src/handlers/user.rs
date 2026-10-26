@@ -805,6 +805,22 @@ mod tests {
         assert!(api["paths"]["/oidc/delete"]["post"]["requestBody"].is_object());
     }
 
+    mod redirect {
+        use crate::handlers::user::token_redirect_url;
+
+        #[test]
+        fn token_redirect_keeps_existing_query_and_fragment() {
+            assert_eq!(
+                token_redirect_url("myapp://oidc?client=1#done", "jwt").unwrap(),
+                "myapp://oidc?client=1&token=jwt#done"
+            );
+            assert_eq!(
+                token_redirect_url("https://client.example/cb", "jwt").unwrap(),
+                "https://client.example/cb?token=jwt"
+            );
+        }
+    }
+
     // Nested so that `actix_web::test` imported above does not shadow the
     // built-in `#[test]` attribute for these synchronous tests.
     mod forwarded {
@@ -1295,7 +1311,14 @@ async fn authenticate_oidc_account_callback(
     };
 
     let jwt = issue_account_session(&mut conn, &account, device_id).await?;
-    Ok(Redirect::to(format!("{redirect_url}?token={jwt}")))
+    Ok(Redirect::to(token_redirect_url(&redirect_url, &jwt)?))
+}
+
+/// Appends the token so that allowed URLs may already carry a query or fragment.
+fn token_redirect_url(redirect_url: &str, jwt: &str) -> HandlerResult<String> {
+    let mut url = url::Url::parse(redirect_url).map_err(|_| HandlerError::ValidationError)?;
+    url.query_pairs_mut().append_pair("token", jwt);
+    Ok(url.into())
 }
 
 /// Start deleting an OIDC account. The deletion happens once the account's owner confirms
