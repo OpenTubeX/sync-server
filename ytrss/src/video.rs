@@ -4,6 +4,8 @@ use serde::Deserialize;
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RssVideo {
+    // `<id>` holds `yt:video:<id>`, while `<yt:videoId>` holds the bare ID.
+    #[serde(rename = "videoId")]
     pub(crate) id: String,
     pub(crate) title: String,
     pub(crate) published: DateTime<Utc>,
@@ -14,7 +16,12 @@ pub struct RssVideo {
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct RssVideoMedia {
-    pub(crate) thumbnail: String,
+    pub(crate) thumbnail: RssVideoThumbnail,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+pub(super) struct RssVideoThumbnail {
+    pub(crate) url: String,
 }
 
 impl RssVideo {
@@ -27,6 +34,6 @@ impl RssVideo {
     }
 
     pub fn thumbnail_url(&self) -> &str {
-        &self.media.thumbnail
+        &self.media.thumbnail.url
     }
 }

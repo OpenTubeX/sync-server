@@ -19,8 +19,7 @@ use crate::auth::{
     TOKEN_TTL, generate_jwt, hash_accountname, hash_password, unix_now, verify_jwt, verify_password,
 };
 use crate::database::account::{
-    delete_existing_account, delete_existing_account_by_oidc_sub, find_account_by_id,
-    find_account_by_name_hash, insert_new_account,
+    delete_existing_account, find_account_by_id, find_account_by_name_hash, insert_new_account,
 };
 use crate::database::account_session;
 use crate::database::encrypted_sync;
@@ -80,7 +79,6 @@ impl ScopedHandler for UserHandler {
             account_scope = account_scope
                 .service(authenticate_oidc_account)
                 .service(authenticate_oidc_account_callback)
-                .service(delete_oidc_account)
                 .service(delete_oidc_account_callback)
         };
 
@@ -92,6 +90,11 @@ impl ScopedHandler for UserHandler {
                     .app_data(web::Data::new(PlaintextSyncExempt))
                     .wrap(actix_web::middleware::from_fn(auth_middleware))
                     .service(delete_account)
+                    .configure(|config| {
+                        if CONFIG.oidc.is_some() {
+                            config.service(delete_oidc_account);
+                        }
+                    })
                     .service(list_account_sessions)
                     .service(update_account_session)
                     .service(revoke_account_session)
@@ -787,7 +790,6 @@ mod tests {
         let api = serde_json::to_value(api).unwrap();
         for (path, expected) in [
             ("/oidc/authenticate", vec!["redirect_url", "device_id"]),
-            ("/oidc/delete", vec!["redirect_url", "device_id"]),
             ("/oidc/authenticate/callback", vec!["code", "state"]),
             ("/oidc/delete/callback", vec!["code", "state"]),
         ] {
@@ -798,6 +800,24 @@ mod tests {
                 .collect();
             assert_eq!(names, expected, "{path}");
             assert!(parameters.iter().all(|p| p["in"] == "query"), "{path}");
+        }
+        assert!(api["paths"]["/oidc/delete"]["get"].is_null());
+        assert!(api["paths"]["/oidc/delete"]["post"]["requestBody"].is_object());
+    }
+
+    mod redirect {
+        use crate::handlers::user::token_redirect_url;
+
+        #[test]
+        fn token_redirect_keeps_existing_query_and_fragment() {
+            assert_eq!(
+                token_redirect_url("myapp://oidc?client=1#done", "jwt").unwrap(),
+                "myapp://oidc?client=1&token=jwt#done"
+            );
+            assert_eq!(
+                token_redirect_url("https://client.example/cb", "jwt").unwrap(),
+                "https://client.example/cb?token=jwt"
+            );
         }
     }
 
@@ -1122,16 +1142,89 @@ mod tests {
 
 #[derive(Deserialize, utoipa::IntoParams)]
 struct OidcAuthenticationRequest {
-    /// Url to redirect to once authentication succeeded.
+    /// Url to redirect to once authentication succeeded. Must be listed in the server's
+    /// `oidc.allowed_redirect_urls`.
     /// Passes a `token` query parameter to the URL, which is a valid JWT for the authenticated account.
     redirect_url: String,
     device_id: Option<String>,
 }
 
-#[derive(Serialize, Deserialize)]
-struct OidcCallbackContext {
+#[derive(Deserialize, utoipa::ToSchema)]
+struct OidcDeleteRequest {
+    /// Url to redirect to once the account was deleted. Must be listed in the server's
+    /// `oidc.allowed_redirect_urls`.
     redirect_url: String,
-    device_id: Option<String>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+struct OidcDeleteResponse {
+    /// Open this URL in a browser to confirm the deletion with the OIDC provider.
+    authorization_url: String,
+}
+
+/// State for the OIDC provider's callback, kept on the server until it arrives.
+///
+/// Both flows share one challenge store, so each callback must only accept its own kind.
+#[derive(Serialize, Deserialize)]
+enum OidcCallbackContext {
+    Authenticate {
+        redirect_url: String,
+        device_id: String,
+    },
+    Delete {
+        redirect_url: String,
+        account_id: String,
+    },
+}
+
+/// Only redirect to client URLs the operator allowed. The login flow passes the session
+/// token to this URL, so an arbitrary one would hand the account to whoever chose it.
+fn validate_oidc_redirect_url(redirect_url: &str) -> HandlerResult<()> {
+    let allowed = CONFIG.oidc.as_ref().is_some_and(|oidc| {
+        oidc.allowed_redirect_urls
+            .iter()
+            .any(|allowed| allowed == redirect_url)
+    });
+    if !allowed {
+        return Err(HandlerError::ValidationErrorWithContext(
+            "redirect_url is not allowed".to_owned(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Returns the provider URL that starts the flow.
+async fn start_oidc_flow(
+    req: &HttpRequest,
+    callback_route_name: &str,
+    context: &OidcCallbackContext,
+) -> HandlerResult<String> {
+    let callback_route = req
+        .url_for::<&[_; 0], &String>(callback_route_name, &[])
+        .unwrap();
+    let context =
+        serde_json::to_string(context).map_err(|_| HandlerError::InternalDatabaseError)?;
+
+    oidc::authenticate_oidc_user_request(
+        &CONFIG.oidc.clone().unwrap(),
+        callback_route.path(),
+        context,
+    )
+    .await
+    .map_err(HandlerError::OidcError)
+}
+
+/// Returns the authenticated subject and the context the flow was started with.
+async fn finish_oidc_flow(
+    query: &OidcCallbackData,
+) -> HandlerResult<(String, OidcCallbackContext)> {
+    let (user_claims, context) = check_oidc_auth_request(&query.state, query.code.clone())
+        .await
+        .map_err(HandlerError::OidcError)?;
+    let context = serde_json::from_str(&context).map_err(|_| HandlerError::ValidationError)?;
+
+    Ok((user_claims.subject().to_string(), context))
 }
 
 #[utoipa::path(params(OidcAuthenticationRequest))]
@@ -1140,23 +1233,18 @@ async fn authenticate_oidc_account(
     req: HttpRequest,
     query: web::Query<OidcAuthenticationRequest>,
 ) -> HandlerResult<impl Responder> {
+    validate_oidc_redirect_url(&query.redirect_url)?;
     let device_id = supplied_or_random_device_id(query.device_id.as_deref())?;
-    let callback_route = req
-        .url_for::<&[_; 0], &String>("authenticate_oidc_account_callback", &[])
-        .unwrap();
 
-    let callback_context = serde_json::to_string(&OidcCallbackContext {
-        redirect_url: query.redirect_url.clone(),
-        device_id: Some(device_id),
-    })
-    .map_err(|_| HandlerError::InternalDatabaseError)?;
-    let redirect_url = oidc::authenticate_oidc_user_request(
-        &CONFIG.oidc.clone().unwrap(),
-        callback_route.path(),
-        callback_context,
+    let redirect_url = start_oidc_flow(
+        &req,
+        "authenticate_oidc_account_callback",
+        &OidcCallbackContext::Authenticate {
+            redirect_url: query.redirect_url.clone(),
+            device_id,
+        },
     )
-    .await
-    .map_err(HandlerError::OidcError)?;
+    .await?;
 
     Ok(Redirect::to(redirect_url))
 }
@@ -1183,17 +1271,16 @@ async fn authenticate_oidc_account_callback(
 ) -> HandlerResult<impl Responder> {
     let mut conn = get_db_conn!(pool);
 
-    let (user_claims, callback_context) = check_oidc_auth_request(&query.state, query.code.clone())
-        .await
-        .map_err(HandlerError::OidcError)?;
-    let context: OidcCallbackContext =
-        serde_json::from_str(&callback_context).map_err(|_| HandlerError::ValidationError)?;
-    let device_id = context.device_id.ok_or(HandlerError::ValidationError)?;
-    validate_device_id(&device_id)?;
+    let (oidc_sub, context) = finish_oidc_flow(&query).await?;
+    let OidcCallbackContext::Authenticate {
+        redirect_url,
+        device_id,
+    } = context
+    else {
+        return Err(HandlerError::ValidationError);
+    };
 
-    let oidc_sub = user_claims.subject().as_str();
-
-    let name_hash = oidc_username_hash(oidc_sub);
+    let name_hash = oidc_username_hash(&oidc_sub);
     let account = if let Some(existing_account) = find_account_by_name_hash(&mut conn, &name_hash)
         .await
         .ok()
@@ -1201,13 +1288,18 @@ async fn authenticate_oidc_account_callback(
     {
         existing_account
     } else {
+        // signing in for the first time registers an account
+        if !CONFIG.allow_registration {
+            return Err(HandlerError::RegistrationDisabled);
+        }
+
         let account = Account {
             id: Uuid::now_v7().to_string(),
             name_hash,
             // the password_hash field should be nullable instead of using an empty string here,
             // but unfortunately SQLite doesn't have a statement to alter table columns...
             password_hash: None,
-            oidc_sub: Some(oidc_sub.to_string()),
+            oidc_sub: Some(oidc_sub),
             legacy_tokens_enabled: false,
             session_generation: 0,
         };
@@ -1219,36 +1311,48 @@ async fn authenticate_oidc_account_callback(
     };
 
     let jwt = issue_account_session(&mut conn, &account, device_id).await?;
-    Ok(Redirect::to(format!(
-        "{}?token={jwt}",
-        context.redirect_url
-    )))
+    Ok(Redirect::to(token_redirect_url(&redirect_url, &jwt)?))
 }
 
-#[utoipa::path(params(OidcAuthenticationRequest))]
-#[get("/oidc/delete")]
+/// Appends the token so that allowed URLs may already carry a query or fragment.
+fn token_redirect_url(redirect_url: &str, jwt: &str) -> HandlerResult<String> {
+    let mut url = url::Url::parse(redirect_url).map_err(|_| HandlerError::ValidationError)?;
+    url.query_pairs_mut().append_pair("token", jwt);
+    Ok(url.into())
+}
+
+/// Start deleting an OIDC account. The deletion happens once the account's owner confirms
+/// their identity with the OIDC provider at the returned URL.
+#[utoipa::path(
+    request_body = OidcDeleteRequest,
+    responses((status = OK, body = OidcDeleteResponse)),
+    security(("api_jwt_token" = []))
+)]
+#[post("/oidc/delete")]
 async fn delete_oidc_account(
     req: HttpRequest,
-    query: web::Query<OidcAuthenticationRequest>,
+    account: Account,
+    body: web::Json<OidcDeleteRequest>,
 ) -> HandlerResult<impl Responder> {
-    let callback_route = req
-        .url_for::<&[_; 0], &String>("delete_oidc_account_callback", &[])
-        .unwrap();
+    if account.oidc_sub.is_none() {
+        return Err(HandlerError::OidcLoginDisabledForAccount);
+    }
+    validate_oidc_redirect_url(&body.redirect_url)?;
 
-    let callback_context = serde_json::to_string(&OidcCallbackContext {
-        redirect_url: query.redirect_url.clone(),
-        device_id: None,
-    })
-    .map_err(|_| HandlerError::InternalDatabaseError)?;
-    let redirect_url = oidc::authenticate_oidc_user_request(
-        &CONFIG.oidc.clone().unwrap(),
-        callback_route.path(),
-        callback_context,
+    // Binding the flow to the authenticated account keeps a navigation that merely
+    // passes through the provider from deleting whichever account signs in. The JSON
+    // body keeps cross-site forms from starting it with an `Authorization` cookie.
+    let authorization_url = start_oidc_flow(
+        &req,
+        "delete_oidc_account_callback",
+        &OidcCallbackContext::Delete {
+            redirect_url: body.into_inner().redirect_url,
+            account_id: account.id,
+        },
     )
-    .await
-    .map_err(HandlerError::OidcError)?;
+    .await?;
 
-    Ok(Redirect::to(redirect_url))
+    Ok(HttpResponse::Ok().json(OidcDeleteResponse { authorization_url }))
 }
 
 #[utoipa::path(params(OidcCallbackData))]
@@ -1259,22 +1363,27 @@ async fn delete_oidc_account_callback(
 ) -> HandlerResult<impl Responder> {
     let mut conn = get_db_conn!(pool);
 
-    let (user_claims, callback_context) = check_oidc_auth_request(&query.state, query.code.clone())
+    let (oidc_sub, context) = finish_oidc_flow(&query).await?;
+    let OidcCallbackContext::Delete {
+        redirect_url,
+        account_id,
+    } = context
+    else {
+        return Err(HandlerError::ValidationError);
+    };
+
+    let account = find_account_by_id(&mut conn, &account_id)
         .await
-        .map_err(HandlerError::OidcError)?;
-    let context: OidcCallbackContext =
-        serde_json::from_str(&callback_context).map_err(|_| HandlerError::ValidationError)?;
+        .map_err(|_| HandlerError::InternalDatabaseError)?
+        .ok_or(HandlerError::AccountNotExists)?;
+    // the provider must confirm the owner of the account that asked for deletion
+    if account.oidc_sub.as_deref() != Some(oidc_sub.as_str()) {
+        return Err(HandlerError::InvalidCredentials);
+    }
 
-    let oidc_sub = user_claims.subject().as_str();
-
-    match delete_existing_account_by_oidc_sub(&mut conn, oidc_sub).await {
-        Ok(deleted) => {
-            if deleted {
-                Ok(Redirect::to(context.redirect_url))
-            } else {
-                Err(HandlerError::AccountNotExists)
-            }
-        }
+    match delete_existing_account(&mut conn, &account.id).await {
+        Ok(true) => Ok(Redirect::to(redirect_url)),
+        Ok(false) => Err(HandlerError::AccountNotExists),
         Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
             err.to_string(),
         )),

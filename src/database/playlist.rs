@@ -6,7 +6,10 @@ use uuid::Uuid;
 
 use crate::{
     DbConnection,
-    database::{DbError, video::create_or_update_video},
+    database::{
+        DbError,
+        video::{create_or_update_video, create_video_if_missing},
+    },
     models::{Channel, Playlist, PlaylistVideoMember, Video},
     schema::{
         channel,
@@ -73,8 +76,13 @@ pub async fn add_video_to_playlist(
     playlist_id_: &str,
     account_id_: &str,
     video_: &Video,
+    verified: bool,
 ) -> Result<(), DbError> {
-    create_or_update_video(conn, video_).await?;
+    if verified {
+        create_or_update_video(conn, video_).await?;
+    } else {
+        create_video_if_missing(conn, video_).await?;
+    }
 
     let new_playlist_video_member = PlaylistVideoMember {
         account_id: account_id_.to_string(),

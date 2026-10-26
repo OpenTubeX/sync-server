@@ -5,7 +5,7 @@ use utoipa_actix_web::scope;
 use crate::{
     DbConnection, WebData,
     database::{
-        quota::count_subscriptions,
+        quota::{count_subscriptions, lock_account_quota},
         subscription::{
             add_subscription_by_account_id, get_subscription_channel_by_account_id,
             get_subscriptions_by_account_id, remove_subscription_by_account_id,
@@ -25,7 +25,7 @@ use crate::{
         check_stored_rows, user::auth_middleware,
     },
     models::{Account, Channel, SubscriptionGroup},
-    validation::{channels_requiring_validation, validate_channel_against_youtube},
+    validation::{channels_requiring_validation, dedup_channels, validate_channel_against_youtube},
 };
 
 pub struct SubscriptionsHandler {}
@@ -80,6 +80,7 @@ async fn subscribe_bulk(
 ) -> HandlerResult<impl Responder> {
     let mut channels = channels.into_inner();
     check_bulk_size(channels.len())?;
+    dedup_channels(&mut channels);
 
     // Work out what needs validating, then release the connection before the
     // network round-trips so that a slow batch cannot hold one for minutes.
@@ -98,6 +99,9 @@ async fn subscribe_bulk(
 
     let mut conn = get_db_conn!(pool);
     conn.transaction::<_, HandlerError, _>(async |conn| {
+        lock_account_quota(conn, &account.id)
+            .await
+            .map_err(|_| HandlerError::InternalDatabaseError)?;
         for channel in &channels {
             add_subscription_by_account_id(conn, channel, &account.id).await?;
         }
@@ -169,6 +173,9 @@ async fn subscribe(
     // can together push the account past the limit.
     conn.transaction::<_, HandlerError, _>(async |conn| {
         let (channel, account_id) = (&channel, &account.id);
+        lock_account_quota(conn, account_id)
+            .await
+            .map_err(|_| HandlerError::InternalDatabaseError)?;
         add_subscription_by_account_id(conn, channel, account_id).await?;
         check_stored_rows(
             count_subscriptions(conn, account_id)

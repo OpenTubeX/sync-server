@@ -29,6 +29,10 @@ pub struct OidcConfig {
     pub client_id: String,
     pub client_secret: String,
     pub app_url: String,
+    /// Client URLs the OIDC flows may redirect back to. Login passes the session
+    /// token to this URL, so only list clients you trust.
+    #[serde(default)]
+    pub allowed_redirect_urls: Vec<String>,
 }
 
 #[derive(serde::Deserialize, Clone)]

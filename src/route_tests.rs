@@ -833,3 +833,149 @@ async fn history_pagination_defaults_page_and_preserves_fork_limits() {
         }
     }
 }
+
+fn test_app_parts(
+    pool: DbPool,
+) -> App<
+    impl actix_web::dev::ServiceFactory<
+        actix_web::dev::ServiceRequest,
+        Config = (),
+        Response = actix_web::dev::ServiceResponse<impl MessageBody>,
+        Error = Error,
+        InitError = (),
+    >,
+> {
+    let (app, _) = App::new()
+        .into_utoipa_app()
+        .app_data(web::Data::new(pool))
+        .app_data(web::Data::new(RateLimiter::default()))
+        .configure(configure_api_routes)
+        .split_for_parts();
+    app
+}
+
+/// The canonical name of the channel the metadata tests submit.
+const FEED_CHANNEL_ID: &str = "UC8-Th83bH_thdKZDJCrn88g";
+
+async fn canonical_feed_channel_name() -> String {
+    ytrss::RssChannel::fetch_from_channel_id(FEED_CHANNEL_ID)
+        .await
+        .unwrap()
+        .name()
+        .to_owned()
+}
+
+/// Regression test: PATCH inserted missing entries without charging the quota.
+#[actix_web::test]
+async fn history_patch_respects_the_row_quota() {
+    let pool = pool().await;
+    let token = seed_account(&pool).await;
+    pool.get().await.unwrap().spawn_blocking(|conn| {
+        use diesel::connection::SimpleConnection;
+        conn.batch_execute(
+            "INSERT INTO channel (id, name, verified) VALUES ('channel', 'Channel', FALSE);
+             WITH RECURSIVE numbers(n) AS (VALUES(1) UNION ALL SELECT n + 1 FROM numbers WHERE n < 50001)
+             INSERT INTO video (id, title, upload_date, thumbnail_url, duration, uploader_id)
+               SELECT 'video-' || n, 'Video', n, 'https://example.test/thumbnail', 60, 'channel' FROM numbers;
+             INSERT INTO watch_history (video_id, account_id, added_date, watched_state)
+               SELECT id, 'account', upload_date, 'watching' FROM video WHERE id != 'video-50001';",
+        )?;
+        Ok(())
+    }).await.unwrap();
+    let app = test::init_service(test_app_parts(pool)).await;
+
+    for (video_id, status) in [
+        ("video-1", StatusCode::OK),
+        ("video-50001", StatusCode::PAYLOAD_TOO_LARGE),
+    ] {
+        let request = test::TestRequest::patch()
+            .uri(&format!("/v1/watch_history/{video_id}"))
+            .insert_header(("Authorization", token.clone()))
+            .set_json(json!({ "added_date": 1, "watched_state": "completed" }))
+            .to_request();
+        assert_eq!(
+            test::call_service(&app, request).await.status(),
+            status,
+            "{video_id}"
+        );
+    }
+}
+
+/// Regression test: metadata the feed couldn't confirm replaced the shared copy,
+/// and the uploader kept its submitted name instead of the canonical one.
+#[actix_web::test]
+async fn history_keeps_stored_metadata_it_cannot_verify() {
+    let pool = pool().await;
+    let token = seed_account(&pool).await;
+    let channel_id = FEED_CHANNEL_ID;
+    pool.get()
+        .await
+        .unwrap()
+        .spawn_blocking(move |conn| {
+            use diesel::connection::SimpleConnection;
+            conn.batch_execute(&format!(
+                "INSERT INTO channel (id, name, verified) VALUES ('{channel_id}', 'Stored', FALSE);
+                 INSERT INTO video (id, title, upload_date, thumbnail_url, duration, uploader_id)
+                   VALUES ('notInFeed01', 'Original Title', 0,
+                     'https://i.ytimg.com/vi/notInFeed01/hqdefault.jpg', 60, '{channel_id}');"
+            ))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = test::init_service(test_app_parts(pool)).await;
+
+    let request = test::TestRequest::put()
+        .uri("/v1/watch_history/")
+        .insert_header(("Authorization", token))
+        .set_json(json!({
+            "video": {
+                "id": "notInFeed01",
+                "title": "Forged Title",
+                "upload_date": 1,
+                "thumbnail_url": "https://i.ytimg.com/vi/forged/hqdefault.jpg",
+                "duration": 1,
+                "uploader": { "id": channel_id, "name": "Tonight Show", "verified": true }
+            },
+            "metadata": { "added_date": 1, "watched_state": "completed" }
+        }))
+        .to_request();
+    let stored: Value = test::call_and_read_body_json(&app, request).await;
+
+    assert_eq!(stored["video"]["title"], "Original Title");
+    assert_eq!(stored["video"]["duration"], 60);
+    assert_eq!(
+        stored["video"]["uploader"]["name"],
+        canonical_feed_channel_name().await
+    );
+}
+
+/// Regression test: only the first of two equal channels was normalized, and
+/// the second one then stored its submitted name.
+#[actix_web::test]
+async fn bulk_subscriptions_store_canonical_names_for_duplicates() {
+    let pool = pool().await;
+    let token = seed_account(&pool).await;
+    let app = test::init_service(test_app_parts(pool)).await;
+
+    let channel = json!({ "id": FEED_CHANNEL_ID, "name": "Tonight Show", "verified": true });
+    let request = test::TestRequest::put()
+        .uri("/v1/subscriptions/bulk")
+        .insert_header(("Authorization", token.clone()))
+        .set_json(json!([channel, channel]))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, request).await.status(),
+        StatusCode::OK
+    );
+
+    let request = test::TestRequest::get()
+        .uri("/v1/subscriptions/")
+        .insert_header(("Authorization", token))
+        .to_request();
+    let subscriptions: Value = test::call_and_read_body_json(&app, request).await;
+    assert_eq!(
+        subscriptions[0]["name"],
+        canonical_feed_channel_name().await
+    );
+}
