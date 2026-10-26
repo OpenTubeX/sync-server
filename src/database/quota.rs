@@ -49,6 +49,25 @@ pub async fn count_playlist_videos(
         .await
 }
 
+/// Serialize quota-checked writes of one account until the transaction ends.
+///
+/// Call this first inside the transaction that writes and then counts. Under
+/// PostgreSQL's default isolation, concurrent transactions don't see each
+/// other's uncommitted rows, so each would pass the count on its own and together
+/// exceed the quota. Updating the account row takes a row lock that the others
+/// wait for. SQLite already serializes writers; there it just takes the write
+/// lock up front.
+pub async fn lock_account_quota(conn: &mut DbConnection, owner_id: &str) -> Result<(), DbError> {
+    use crate::schema::account::dsl::*;
+
+    diesel::update(account.filter(id.eq(owner_id)))
+        .set(session_generation.eq(session_generation))
+        .execute(conn)
+        .await?;
+
+    Ok(())
+}
+
 /// Whether an account holds more rows than the per-table quota allows.
 ///
 /// Callers check the rows that actually exist rather than predicting how many a

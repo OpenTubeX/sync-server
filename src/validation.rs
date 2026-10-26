@@ -106,21 +106,15 @@ async fn is_channel_validation_required(conn: &mut DbConnection, channel: &Chann
 /// [`validate_channel_against_youtube`], so that a batch of slow network
 /// round-trips never occupies a pooled connection.
 ///
-/// Returned indices are deduplicated by the whole channel value.
-///
-/// Deduplicating by id alone would be a validation bypass: two entries can share
-/// an id but carry different names or avatars, and the caller persists every
-/// entry. Skipping the second one would let it reach the database unvalidated.
-/// Channels are shared between accounts, so that would also let one account
-/// poison a channel's avatar for everyone.
+/// Callers persisting a batch should pass it through [`dedup_channels`] first.
 pub async fn channels_requiring_validation(
     conn: &mut DbConnection,
     channels: &[Channel],
 ) -> Vec<usize> {
     let mut required = Vec::new();
 
-    for index in distinct_channel_indices(channels) {
-        if is_channel_validation_required(conn, &channels[index]).await {
+    for (index, channel) in channels.iter().enumerate() {
+        if is_channel_validation_required(conn, channel).await {
             required.push(index);
         }
     }
@@ -128,19 +122,19 @@ pub async fn channels_requiring_validation(
     required
 }
 
-/// Indices of the first occurrence of each distinct channel value.
+/// Drop later copies of fully equal channels, keeping the first occurrence.
 ///
-/// Entries that are fully equal are interchangeable, so validating one covers
-/// the rest. Entries that differ in any field are kept separately.
-fn distinct_channel_indices(channels: &[Channel]) -> Vec<usize> {
+/// Validation rewrites each entry in place, so a duplicate that is only skipped
+/// would still be persisted with its submitted name and overwrite the canonical
+/// one. Channels are shared between accounts, so the batch must contain each
+/// value once.
+///
+/// Deduplicating by id alone would be a validation bypass instead: two entries
+/// can share an id but carry different names or avatars, so entries that differ
+/// in any field are kept and validated separately.
+pub fn dedup_channels(channels: &mut Vec<Channel>) {
     let mut seen = HashSet::new();
-
-    channels
-        .iter()
-        .enumerate()
-        .filter(|(_, channel)| seen.insert(*channel))
-        .map(|(index, _)| index)
-        .collect()
+    channels.retain(|channel| seen.insert(channel.clone()));
 }
 
 /// Validate a channel against its YouTube RSS feed.
@@ -214,14 +208,19 @@ pub async fn videos_requiring_validation(
 /// the same length as `video_datas`. Deliberately takes no database connection
 /// so that callers cannot hold one across the network round-trip.
 ///
+/// Returns, per video, whether its metadata may replace a stored copy. That is
+/// only true for videos the feed confirmed. Other metadata is client-supplied,
+/// and videos are shared between accounts, so callers must only insert those
+/// when no copy exists yet.
+///
 /// Requirement: all videos must be from the same channel!
 pub async fn validate_videos_against_youtube(
     video_datas: &mut [CreateVideo],
     needs_validation: &[bool],
     channel: &mut Channel,
-) -> HandlerResult<()> {
+) -> HandlerResult<Vec<bool>> {
     if !CONFIG.validate_submitted_metadata {
-        return Ok(());
+        return Ok(vec![true; video_datas.len()]);
     }
 
     // `zip` below truncates to the shorter slice, which would silently skip
@@ -244,45 +243,64 @@ pub async fn validate_videos_against_youtube(
     let channel_rss = RssChannel::fetch_from_channel_id(&channel.id)
         .await
         .map_err(|_| HandlerError::YouTubeConnectError)?;
-    (*channel) = validate_channel_information(channel.clone(), &channel_rss)
+    validate_videos_against_feed(video_datas, needs_validation, channel, &channel_rss)
+}
+
+/// The part of [`validate_videos_against_youtube`] that runs once the feed is loaded.
+fn validate_videos_against_feed(
+    video_datas: &mut [CreateVideo],
+    needs_validation: &[bool],
+    channel: &mut Channel,
+    channel_rss: &RssChannel,
+) -> HandlerResult<Vec<bool>> {
+    (*channel) = validate_channel_information(channel.clone(), channel_rss)
         .map_err(|_| HandlerError::ValidationError)?;
 
+    let mut verified = Vec::with_capacity(video_datas.len());
     for (video_data, needs_validation) in video_datas.iter_mut().zip(needs_validation) {
+        // Callers persist each video's own uploader, so it must carry the
+        // canonical channel rather than the submitted one.
+        video_data.uploader = channel.clone();
+
+        // Matching the stored copy when it was read doesn't make it verified:
+        // another entry or request may have corrected that copy since.
         if !needs_validation {
+            verified.push(false);
             continue;
         }
 
-        (*video_data) = validate_video_information(video_data.clone(), &channel_rss)
-            .map_err(|_| HandlerError::ValidationError)?;
+        match validate_video_information(video_data.clone(), channel_rss)
+            .map_err(|_| HandlerError::ValidationError)?
+        {
+            Some(validated) => {
+                (*video_data) = validated;
+                verified.push(true);
+            }
+            None => verified.push(false),
+        }
     }
 
-    Ok(())
+    Ok(verified)
 }
 
-/// Validates the video exists and returns updated meta information from the RSS feed.
+/// Returns the video with its metadata taken from the RSS feed, or [None] if
+/// the feed doesn't contain it and the metadata therefore can't be verified.
 ///
 /// You should use the resulting [CreateVideo] for doing any further actions with the video,
 /// because its metadata is more accurate.
 fn validate_video_information(
     video_data: CreateVideo,
     rss_channel: &RssChannel,
-) -> Result<CreateVideo, String> {
+) -> Result<Option<CreateVideo>, String> {
     // validate thumbnail URL
     if !verify_image_url(&video_data.thumbnail_url) {
         return Err("invalid channel information provided".to_string());
     }
 
-    let Some(oldest_date) = rss_channel.oldest_video_date() else {
-        return Ok(video_data);
-    };
-
-    // Video is older than the videos in the feed
-    if oldest_date.timestamp_millis() > video_data.upload_date {
-        return Ok(video_data);
-    }
-
+    // The feed only lists a channel's latest uploads, so older videos are
+    // legitimately missing from it.
     let Some(rss_video) = rss_channel.find_video(&video_data.id) else {
-        return Ok(video_data);
+        return Ok(None);
     };
 
     let mut video_data = video_data;
@@ -290,7 +308,7 @@ fn validate_video_information(
     video_data.upload_date = rss_video.date().timestamp_millis();
     video_data.thumbnail_url = rss_video.thumbnail_url().to_string();
 
-    Ok(video_data)
+    Ok(Some(video_data))
 }
 
 pub async fn validate_public_playlist_information_if_changed(
@@ -305,6 +323,8 @@ pub async fn validate_public_playlist_information_if_changed(
         .await
         .map_err(|_| HandlerError::YouTubeConnectError)?;
 
+    validate_playlist_owner(&playlist.uploader, &rss_playlist)?;
+
     let mut uploader = playlist.uploader.clone();
     if is_channel_validation_required(conn, &uploader).await {
         uploader = validate_channel_information(uploader, &rss_playlist.to_channel())
@@ -318,7 +338,10 @@ pub async fn validate_public_playlist_information_if_changed(
         .flatten()
         && playlist.playlist == ExtendedPlaylist::from_public_playlist(&existing_playlist)
     {
-        return Ok(playlist);
+        return Ok(ExtendedPublicPlaylist {
+            playlist: playlist.playlist,
+            uploader,
+        });
     }
 
     let validated_playlist = validate_playlist_information(playlist.playlist, &rss_playlist)
@@ -328,6 +351,20 @@ pub async fn validate_public_playlist_information_if_changed(
         playlist: validated_playlist,
         uploader,
     })
+}
+
+/// Bind the submitted uploader to the playlist's owner before trusting its name.
+///
+/// The name is the only author detail compared otherwise, so without this any
+/// playlist would vouch for metadata of an arbitrary, shared channel.
+fn validate_playlist_owner(uploader: &Channel, rss_playlist: &RssPlaylist) -> HandlerResult<()> {
+    if rss_playlist.channel_id() != Some(uploader.id.as_str()) {
+        return Err(HandlerError::ValidationErrorWithContext(
+            "uploader doesn't own the playlist".to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 // Update the given playlist based on the playlist's RSS feed.
@@ -354,10 +391,120 @@ mod test {
         dto::{CreateVideo, ExtendedPlaylist},
         models::Channel,
         validation::{
-            validate_channel_information, validate_playlist_information,
-            validate_video_information, verify_image_url,
+            validate_channel_information, validate_playlist_information, validate_playlist_owner,
+            validate_video_information, validate_videos_against_feed, verify_image_url,
         },
     };
+
+    /// A feed as served by YouTube, with one video entry.
+    fn feed(kind: &str, owner_id: &str, owner_name: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns:media="http://search.yahoo.com/mrss/" xmlns="http://www.w3.org/2005/Atom">
+ <id>yt:{kind}</id>
+ <title>{owner_name}</title>
+ <author>
+  <name>{owner_name}</name>
+  <uri>https://www.youtube.com/channel/{owner_id}</uri>
+ </author>
+ <entry>
+  <id>yt:video:in_feed</id>
+  <yt:videoId>in_feed</yt:videoId>
+  <yt:channelId>{owner_id}</yt:channelId>
+  <title>Real Title</title>
+  <published>2026-10-01T00:00:00+00:00</published>
+  <media:group>
+   <media:title>Real Title</media:title>
+   <media:thumbnail url="https://i1.ytimg.com/vi/in_feed/hqdefault.jpg" width="480" height="360"/>
+  </media:group>
+ </entry>
+</feed>"#
+        )
+    }
+
+    fn channel_feed() -> RssChannel {
+        RssChannel::from_xml(&feed("channel", "UC_channel", "Canonical Name")).unwrap()
+    }
+
+    fn video(id: &str, uploader: Channel) -> CreateVideo {
+        CreateVideo {
+            id: id.to_owned(),
+            title: "Forged Title".to_owned(),
+            // older than everything in the feed
+            upload_date: 0,
+            thumbnail_url: "https://i1.ytimg.com/vi/forged/hqdefault.jpg".to_owned(),
+            duration: 60,
+            uploader,
+        }
+    }
+
+    /// Regression test: a submitted upload date older than the feed skipped the
+    /// lookup, so forged metadata for a video in the feed was accepted.
+    #[test]
+    fn videos_in_the_feed_take_its_metadata() {
+        let validated = validate_video_information(
+            video("in_feed", channel("UC_channel", "Canonical")),
+            &channel_feed(),
+        )
+        .unwrap()
+        .expect("the video is in the feed");
+
+        assert_eq!(validated.title, "Real Title");
+        assert_eq!(
+            validated.thumbnail_url,
+            "https://i1.ytimg.com/vi/in_feed/hqdefault.jpg"
+        );
+        assert_eq!(validated.upload_date, 1_790_812_800_000);
+    }
+
+    /// Regression test: videos missing from the feed were reported as valid, so
+    /// their unverified metadata replaced the shared copy.
+    #[test]
+    fn videos_missing_from_the_feed_are_unverified() {
+        let unverified = video("elsewhere", channel("UC_channel", "Canonical"));
+
+        assert!(
+            validate_video_information(unverified, &channel_feed())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// Regression test: only the grouped channel was normalized, while callers
+    /// persisted each video's uploader with the submitted name.
+    #[test]
+    fn validated_videos_carry_the_canonical_uploader() {
+        let mut uploader = channel("UC_channel", "canonical");
+        let mut videos = [
+            video("in_feed", uploader.clone()),
+            video("elsewhere", uploader.clone()),
+            video("stored", uploader.clone()),
+        ];
+
+        let verified = validate_videos_against_feed(
+            &mut videos,
+            &[true, true, false],
+            &mut uploader,
+            &channel_feed(),
+        )
+        .unwrap();
+
+        assert_eq!(uploader.name, "Canonical Name");
+        assert_eq!(verified, [true, false, false]);
+        for video in &videos {
+            assert_eq!(video.uploader, uploader);
+        }
+    }
+
+    /// Regression test: a playlist's author name vouched for any submitted
+    /// channel ID.
+    #[test]
+    fn playlist_uploader_must_own_the_playlist() {
+        let playlist = RssPlaylist::from_xml(&feed("playlist", "UC_owner", "Owner")).unwrap();
+
+        assert!(validate_playlist_owner(&channel("UC_owner", "Owner"), &playlist).is_ok());
+        assert!(validate_playlist_owner(&channel("UC_victim", "Owner"), &playlist).is_err());
+    }
 
     fn channel(id: &str, name: &str) -> Channel {
         Channel {
@@ -372,28 +519,30 @@ mod test {
     /// id but carrying forged fields reach the database unvalidated.
     #[test]
     fn dedup_keeps_channels_that_share_an_id_but_differ() {
-        let channels = [
+        let mut channels = vec![
             channel("UC_same", "Real Name"),
             channel("UC_same", "Forged Name"),
         ];
+        let expected = channels.clone();
 
-        assert_eq!(
-            crate::validation::distinct_channel_indices(&channels),
-            vec![0, 1]
-        );
+        crate::validation::dedup_channels(&mut channels);
+        assert_eq!(channels, expected);
     }
 
+    /// Regression test: only the first of two equal entries was normalized, and
+    /// the second one then overwrote the canonical name with the submitted one.
     #[test]
     fn dedup_collapses_fully_equal_channels() {
-        let channels = [
+        let mut channels = vec![
             channel("UC_a", "Name"),
             channel("UC_a", "Name"),
             channel("UC_b", "Other"),
         ];
 
+        crate::validation::dedup_channels(&mut channels);
         assert_eq!(
-            crate::validation::distinct_channel_indices(&channels),
-            vec![0, 2]
+            channels,
+            vec![channel("UC_a", "Name"), channel("UC_b", "Other")]
         );
     }
 

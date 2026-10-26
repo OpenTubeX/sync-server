@@ -7,8 +7,8 @@ use crate::{
     WebData,
     database::{
         channel::create_or_update_channel,
-        quota::count_watch_history,
-        video::create_or_update_video,
+        quota::{count_watch_history, lock_account_quota},
+        video::{create_or_update_video, create_video_if_missing},
         watch_history::{
             DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, add_or_update_video_to_watch_history,
             clear_watch_history_by_account_id, get_watch_history_by_account_id,
@@ -48,6 +48,13 @@ impl ScopedHandler for WatchHistoryHandler {
     }
 }
 
+/// An item ready to persist, and whether its video metadata may replace the
+/// stored copy (see [`validate_videos_against_youtube`]).
+struct PreparedItem {
+    item: ExtendedWatchHistoryItem,
+    verified: bool,
+}
+
 /// Stamp ownership onto a batch of items and validate their videos.
 ///
 /// Validation is grouped by uploader, so a batch costs one YouTube round-trip
@@ -57,7 +64,7 @@ async fn prepare_watch_history_items(
     pool: &WebData,
     account_id: &str,
     mut items: Vec<ExtendedWatchHistoryItem>,
-) -> HandlerResult<Vec<ExtendedWatchHistoryItem>> {
+) -> HandlerResult<Vec<PreparedItem>> {
     for item in &mut items {
         item.metadata.account_id = account_id.to_string();
         item.metadata.video_id = item.video.id.clone();
@@ -93,12 +100,17 @@ async fn prepare_watch_history_items(
         }
     }
 
-    for (((channel, _), videos), needs_validation) in groups
+    let mut verified = vec![true; items.len()];
+    for (((channel, indices), videos), needs_validation) in groups
         .iter_mut()
         .zip(grouped_videos.iter_mut())
         .zip(&needs_validation)
     {
-        validate_videos_against_youtube(videos, needs_validation, channel).await?;
+        let group_verified =
+            validate_videos_against_youtube(videos, needs_validation, channel).await?;
+        for (index, group_verified) in indices.iter().zip(group_verified) {
+            verified[*index] = group_verified;
+        }
     }
 
     // write the validated metadata back onto the items
@@ -108,19 +120,27 @@ async fn prepare_watch_history_items(
         }
     }
 
-    Ok(items)
+    Ok(items
+        .into_iter()
+        .zip(verified)
+        .map(|(item, verified)| PreparedItem { item, verified })
+        .collect())
 }
 
 async fn persist_watch_history_item(
     conn: &mut crate::DbConnection,
-    item: &ExtendedWatchHistoryItem,
+    PreparedItem { item, verified }: &PreparedItem,
 ) -> HandlerResult<()> {
     create_or_update_channel(conn, &item.video.uploader)
         .await
         .map_err(|_| HandlerError::InternalDatabaseError)?;
-    create_or_update_video(conn, &(&item.video).into())
-        .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?;
+    let video = (&item.video).into();
+    if *verified {
+        create_or_update_video(conn, &video).await
+    } else {
+        create_video_if_missing(conn, &video).await
+    }
+    .map_err(|_| HandlerError::InternalDatabaseError)?;
     add_or_update_video_to_watch_history(conn, &item.metadata)
         .await
         .map_err(|_| HandlerError::InternalDatabaseError)?;
@@ -131,9 +151,12 @@ async fn persist_watch_history_item(
 async fn persist_watch_history_items(
     conn: &mut crate::DbConnection,
     account_id: &str,
-    items: &[ExtendedWatchHistoryItem],
+    items: &[PreparedItem],
 ) -> HandlerResult<()> {
     conn.transaction::<_, HandlerError, _>(async |conn| {
+        lock_account_quota(conn, account_id)
+            .await
+            .map_err(|_| HandlerError::InternalDatabaseError)?;
         for item in items {
             persist_watch_history_item(conn, item).await?;
         }
@@ -155,13 +178,11 @@ async fn store_watch_history_items(
     pool: &WebData,
     account_id: &str,
     items: Vec<ExtendedWatchHistoryItem>,
-) -> HandlerResult<Vec<ExtendedWatchHistoryItem>> {
+) -> HandlerResult<()> {
     let items = prepare_watch_history_items(pool, account_id, items).await?;
 
     let mut conn = get_db_conn!(pool);
-    persist_watch_history_items(&mut conn, account_id, &items).await?;
-
-    Ok(items)
+    persist_watch_history_items(&mut conn, account_id, &items).await
 }
 
 #[utoipa::path(responses((status = OK)), security(("api_jwt_token" = [])))]
@@ -266,15 +287,21 @@ async fn add_to_watch_history(
     pool: WebData,
     watch_history_item: web::Json<ExtendedWatchHistoryItem>,
 ) -> HandlerResult<impl Responder> {
-    let mut stored =
-        store_watch_history_items(&pool, &account.id, vec![watch_history_item.into_inner()])
-            .await?;
+    let video_id = watch_history_item.video.id.clone();
+    store_watch_history_items(&pool, &account.id, vec![watch_history_item.into_inner()]).await?;
 
-    // One item in, one item out. Answering `200 null` if that ever stops holding
-    // would be a silently wrong response, so make it an error instead.
-    let stored = stored.pop().ok_or(HandlerError::InternalDatabaseError)?;
+    // Answer with what was stored: the submitted metadata may have been
+    // normalized, or kept out in favor of a stored copy.
+    let mut conn = get_db_conn!(pool);
+    let (metadata, video, channel) = get_watch_history_entry(&mut conn, &account.id, &video_id)
+        .await
+        .map_err(|_| HandlerError::InternalDatabaseError)?
+        .ok_or(HandlerError::InternalDatabaseError)?;
 
-    Ok(HttpResponse::Ok().json(stored))
+    Ok(HttpResponse::Ok().json(ExtendedWatchHistoryItem {
+        video: CreateVideo::from((&video, &channel)),
+        metadata,
+    }))
 }
 
 #[utoipa::path(responses((status = OK)), security(("api_jwt_token" = [])))]
@@ -291,9 +318,23 @@ async fn update_watch_history_video_state(
     watch_history_item.video_id = video_id.into_inner();
     watch_history_item.account_id = account.id;
 
-    add_or_update_video_to_watch_history(&mut conn, &watch_history_item)
-        .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?;
+    // This adds the entry if it doesn't exist yet, so it's subject to the quota.
+    conn.transaction::<_, HandlerError, _>(async |conn| {
+        let (item, account_id) = (&watch_history_item, &watch_history_item.account_id);
+        lock_account_quota(conn, account_id)
+            .await
+            .map_err(|_| HandlerError::InternalDatabaseError)?;
+        add_or_update_video_to_watch_history(conn, item)
+            .await
+            .map_err(|_| HandlerError::InternalDatabaseError)?;
+        check_stored_rows(
+            count_watch_history(conn, account_id)
+                .await
+                .map_err(|_| HandlerError::InternalDatabaseError)?,
+        )?;
+        Ok(())
+    })
+    .await?;
 
     Ok(HttpResponse::Ok().json(watch_history_item))
 }

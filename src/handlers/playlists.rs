@@ -12,7 +12,7 @@ use crate::{
             get_playlist_by_id_with_videos, get_playlist_video_count, get_playlists_by_account_id,
             remove_video_from_playlist, update_existing_playlist,
         },
-        quota::count_playlist_videos,
+        quota::{count_playlist_videos, lock_account_quota},
     },
     dto::{CreatePlaylist, CreateVideo, ExtendedPlaylist, PlaylistResponse},
     get_db_conn,
@@ -236,27 +236,32 @@ async fn add_to_playlist(
         }
     }
 
+    let mut verified = Vec::with_capacity(groups.len());
     for ((channel, videos), needs_validation) in groups.iter_mut().zip(&needs_validation) {
-        validate_videos_against_youtube(videos, needs_validation, channel).await?;
+        verified.push(validate_videos_against_youtube(videos, needs_validation, channel).await?);
     }
 
     let mut conn = get_db_conn!(pool);
     conn.transaction::<_, HandlerError, _>(async |conn| {
-        let (groups, playlist_id, account_id) = (&groups, &*playlist_id, &account.id);
+        let (groups, verified, playlist_id, account_id) =
+            (&groups, &verified, &*playlist_id, &account.id);
+        lock_account_quota(conn, account_id)
+            .await
+            .map_err(|_| HandlerError::InternalDatabaseError)?;
         // Re-check ownership: the earlier check happened before the RSS
         // round-trips, which can take seconds, so the playlist may have been
         // deleted since. Without this the inserts fail as an opaque database
         // error instead of PlaylistNotExists.
         get_owned_playlist_or_error(conn, playlist_id, account_id).await?;
 
-        for (channel, videos) in groups {
+        for ((channel, videos), verified) in groups.iter().zip(verified) {
             // store channel information first before storing video to ensure data integrity
             create_or_update_channel(conn, channel)
                 .await
                 .map_err(|_| HandlerError::InternalDatabaseError)?;
 
-            for video in videos {
-                add_video_to_playlist(conn, playlist_id, account_id, &video.into())
+            for (video, verified) in videos.iter().zip(verified) {
+                add_video_to_playlist(conn, playlist_id, account_id, &video.into(), *verified)
                     .await
                     .map_err(|_| HandlerError::InternalDatabaseError)?;
             }

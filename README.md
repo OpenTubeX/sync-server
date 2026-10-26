@@ -190,9 +190,14 @@ the schema. Remove the approval after deployment so it cannot authorize a later 
 | `client_id`                     | Client ID of the OAuth app configured at the OIDC provider     | None       | SecretOauthAppClientID   |
 | `client_secret`                 | Client secret of the OAuth app configured at the OIDC provider | None       | SomeVerySecureString64   |
 | `app_url`                       | Public URL to the `sync-server` instance                       | None       | https://sync.example.com |
+| `allowed_redirect_urls`         | Client URLs that OIDC login and deletion may redirect back to  | `[]`       | ["myapp://oidc"]         |
 
 The OIDC app must be configured to allow redirects to `<your_app_url>/v1/account/oidc/authenticate/callback` and
-`<your_app_url>/v1/account/oidc/authenticate/delete/callback`.
+`<your_app_url>/v1/account/oidc/delete/callback`.
+
+OIDC login passes the session token to its `redirect_url`, so the server only accepts URLs listed exactly in
+`allowed_redirect_urls`. With an empty list, OIDC login and deletion are refused. Signing in with OIDC for the
+first time creates an account, which `allow_registration = false` prevents.
 
 ## API Documentation
 - Start the app, e.g. with `cargo run`.
@@ -202,6 +207,9 @@ The OIDC app must be configured to allow redirects to `<your_app_url>/v1/account
 There are two ways to login:
 - via username and password, i.e. credentials are stored on the server
 - via OpenID Connect, i.e. authentication is delegated to an OIDC server. Only works if you configure the OIDC provider as described in [the configuration reference](configuration-reference)
+
+To delete an OIDC account, send an authenticated `POST /v1/account/oidc/delete` request and open the returned
+`authorization_url` in a browser. The account is deleted once its owner signs in with the OIDC provider there.
 
 After registering or logging in, you receive a `jwt` as response.
 

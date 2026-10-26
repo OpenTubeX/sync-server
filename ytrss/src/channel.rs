@@ -14,13 +14,30 @@ pub struct RssChannel {
 #[derive(Debug, Default, Clone, Deserialize)]
 pub(crate) struct RssChannelAuthor {
     pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) uri: Option<String>,
+}
+
+impl RssChannelAuthor {
+    /// The author's channel ID, taken from their `/channel/<id>` URI.
+    pub(crate) fn channel_id(&self) -> Option<&str> {
+        self.uri
+            .as_deref()?
+            .rsplit_once("/channel/")
+            .map(|(_, id)| id)
+            .filter(|id| !id.is_empty())
+    }
 }
 
 impl RssChannel {
     pub async fn fetch_from_channel_id(channel_id: &str) -> YouTubeResult<Self> {
         let response_body = crate::fetch_feed("channel_id", channel_id).await?;
 
-        serde_roxmltree::from_str(&response_body).map_err(YouTubeError::ParserError)
+        Self::from_xml(&response_body)
+    }
+
+    pub fn from_xml(xml: &str) -> YouTubeResult<Self> {
+        serde_roxmltree::from_str(xml).map_err(YouTubeError::ParserError)
     }
 
     pub fn name(&self) -> &str {

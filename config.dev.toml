@@ -19,3 +19,5 @@ provider_url = "http://localhost:9400"
 client_id = "changeme"
 client_secret = "changeme"
 app_url = "http://localhost:8080"
+# Client URLs that OIDC login and deletion may redirect back to.
+# allowed_redirect_urls = ["myapp://oidc"]
