@@ -1242,5 +1242,56 @@ mod change_tests {
             (status, read["payload"].clone()),
             (200, json!("compacted-again"))
         );
+
+        // Collections stored before the migration keep base revision 0.
+        use diesel_async::RunQueryDsl;
+        diesel::sql_query(
+            "INSERT INTO encrypted_sync (account_id, collection, revision, payload) VALUES ('owner', 'settings', 5, 'old')",
+        )
+        .execute(&mut pool.get().await.unwrap())
+        .await
+        .unwrap();
+        crate::database::account_session::revoke(
+            &mut pool.get().await.unwrap(),
+            "owner",
+            "older",
+            0,
+            now,
+        )
+        .await
+        .unwrap();
+        let settings = |revision: i64| {
+            test::TestRequest::post()
+                .uri("/sync/settings/changes")
+                .set_json(json!({ "revision": revision, "payload": "settings-change" }))
+        };
+        let (status, read) = call(test::TestRequest::get().uri("/sync/settings"), &other).await;
+        assert_eq!((status, read["revision"].clone()), (200, json!(5)));
+        let (_, read) = call(
+            test::TestRequest::get().uri("/sync/settings?since=5"),
+            &other,
+        )
+        .await;
+        assert_eq!(
+            read,
+            json!({ "collection": "settings", "revision": 5, "payload": null, "base_revision": 5, "changes": [] })
+        );
+        assert_eq!(call(settings(5), &current).await.0, 200);
+        let (_, read) = call(
+            test::TestRequest::get().uri("/sync/settings?since=0"),
+            &other,
+        )
+        .await;
+        assert_eq!(
+            read,
+            json!({ "collection": "settings", "revision": 6, "payload": "old", "base_revision": 5,
+                "changes": [{ "revision": 6, "payload": "settings-change" }] })
+        );
+        assert_eq!(
+            call(test::TestRequest::get().uri("/sync/settings"), &other)
+                .await
+                .0,
+            409
+        );
     }
 }
