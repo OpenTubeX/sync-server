@@ -36,6 +36,8 @@ pub struct SyncCapabilities {
     pub watch_stats: u8,
     pub live_reminders: u8,
     pub live_sync: u8,
+    /// Collections accept appended changes and incremental reads.
+    pub collection_changes: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -59,11 +61,24 @@ pub struct EncryptedSyncCollectionRevision {
     pub revision: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct EncryptedSyncCollectionResponse {
     pub collection: String,
     pub revision: i64,
+    /// The full collection at `base_revision`. Omitted from incremental reads.
     pub payload: Option<String>,
+    /// Returned to clients that read with `since`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_revision: Option<i64>,
+    /// Changes after `payload`, or after `since` when `payload` is omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changes: Option<Vec<EncryptedSyncChange>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EncryptedSyncChange {
+    pub revision: i64,
+    pub payload: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

@@ -40,6 +40,10 @@ device using a separate privacy passphrase. The server stores the encrypted
 payload, collection name, revision, account ID, and padded payload size. It
 never receives the passphrase or plaintext. The operator can still observe
 account activity, request timing, collection names, and approximate data size.
+Compatible clients can upload small encrypted changes instead of a whole
+collection. These are padded in smaller blocks, so their number and size show
+roughly how much changed. The server also records whether each account session
+can read these changes.
 The server cannot recover a lost privacy passphrase.
 
 **Account activity and device requests.** Compatible clients upload encrypted

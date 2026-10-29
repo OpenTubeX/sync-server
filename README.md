@@ -3,7 +3,7 @@ Server to synchronize OpenTubeX data between devices, including subscriptions, p
 
 OpenTubeX clients can use the encrypted sync API exposed by this server. In
 that mode all synchronized content is encrypted on the client with a separate
-privacy passphrase and the server stores one opaque, revisioned document per
+privacy passphrase and the server stores opaque, revisioned collections per
 account. Documents are padded in 64 KiB blocks to reduce size leakage. The
 operator can still observe account activity, IP addresses, request timing, and
 approximate encrypted document size, but cannot read its contents.
@@ -284,6 +284,25 @@ enables the `watchStats` collection for per-device totals.
 The combined active encrypted collections for one account cannot exceed 128 MiB.
 Existing encrypted `playbackSpeeds` collections remain readable for migration,
 but uploads to that collection return HTTP 405.
+
+Capability `collection_changes: 1` lets clients upload a small encrypted change
+instead of the full collection. `POST /v1/encrypted_sync/{collection}/changes`
+takes the same body as `PUT` and appends one change at the next revision. The
+server stores changes as opaque ciphertext, so the client that wrote them is
+responsible for their format. `GET /v1/encrypted_sync/{collection}?since={revision}`
+returns `base_revision` and `changes`. When the change log covers `since`, the
+response omits `payload` and lists only later changes. Otherwise it contains the
+full payload at `base_revision`, followed by every change after it. A `PUT`
+stores a new full payload and clears the change log.
+
+Clients that read without `since` cannot apply changes. While a collection has
+pending changes, such reads fail with HTTP 409. To prevent that, an append
+returns HTTP 412 unless every active session of the account has read with
+`since`, and the account accepts no unused legacy tokens. It also returns 412
+when the collection has never been fully uploaded, already holds 64 changes, or
+when its changes would exceed the size of the full payload (with a 1 MiB
+minimum). Clients then upload the full collection instead. Each change can be
+up to 256 KiB, and changes count toward the account storage limit.
 
 ### Secure device pairing
 

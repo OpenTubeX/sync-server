@@ -63,6 +63,12 @@ pub enum HandlerError {
     EncryptedSyncConflict,
     #[error("encrypted sync collection is too large")]
     EncryptedSyncTooLarge,
+    #[error(
+        "another device saved changes to this collection that require a newer OpenTubeX version; update OpenTubeX, or sync again after that device has synced"
+    )]
+    EncryptedSyncChangesPending,
+    #[error("upload the full encrypted sync collection")]
+    EncryptedSyncFullUploadRequired,
     #[error("too many items in one request (max {0})")]
     BulkRequestTooLarge(usize),
     #[error("too many requests; slow down and try again later")]
@@ -114,6 +120,8 @@ impl ResponseError for HandlerError {
             Self::ValidationErrorWithContext(_) => StatusCode::BAD_REQUEST,
             Self::EncryptedSyncConflict => StatusCode::CONFLICT,
             Self::EncryptedSyncTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::EncryptedSyncChangesPending => StatusCode::CONFLICT,
+            Self::EncryptedSyncFullUploadRequired => StatusCode::PRECONDITION_FAILED,
             Self::BulkRequestTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
             Self::StorageQuotaExceeded => StatusCode::PAYLOAD_TOO_LARGE,
