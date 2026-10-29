@@ -13,11 +13,22 @@ diesel::table! {
         legacy -> Bool,
         generation -> BigInt,
         pending_pairing -> Bool,
+        reads_collection_changes -> Bool,
     }
 }
 
 diesel::table! {
     encrypted_sync (account_id, collection) {
+        account_id -> Text,
+        collection -> Text,
+        revision -> BigInt,
+        payload -> Text,
+        base_revision -> BigInt,
+    }
+}
+
+diesel::table! {
+    encrypted_sync_change (account_id, collection, revision) {
         account_id -> Text,
         collection -> Text,
         revision -> BigInt,
@@ -162,6 +173,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     account_session,
     channel,
     encrypted_sync,
+    encrypted_sync_change,
     pairing_session,
     playlist,
     playlist_bookmark,

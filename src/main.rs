@@ -488,7 +488,17 @@ mod tests {
         );
         assert_eq!(table_count(&mut conn, "encrypted_sync"), 2);
         assert_eq!(table_count(&mut conn, "encrypted_sync_single_document"), 1);
-        conn.revert_last_migration(super::MIGRATIONS).unwrap();
+        // Later migrations are reverted first.
+        while diesel::sql_query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE name = 'channel_playback_speed'",
+        )
+        .get_result::<RowCount>(&mut conn)
+        .unwrap()
+        .count
+            == 0
+        {
+            conn.revert_last_migration(super::MIGRATIONS).unwrap();
+        }
         assert_eq!(table_count(&mut conn, "channel_playback_speed"), 0);
         assert_eq!(table_count(&mut conn, "encrypted_sync"), 2);
         assert_eq!(table_count(&mut conn, "encrypted_sync_single_document"), 1);

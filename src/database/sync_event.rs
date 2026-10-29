@@ -285,7 +285,7 @@ mod tests {
         assert!(result.is_err());
         assert!(list(&mut conn, "b", "phone", now).await.unwrap().is_empty());
         assert!(
-            crate::database::encrypted_sync::get(&mut conn, "b", "settings")
+            crate::database::encrypted_sync::get_full(&mut conn, "b", "settings")
                 .await
                 .unwrap()
                 .is_none()

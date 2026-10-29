@@ -7,8 +7,8 @@ use crate::database::encrypted_sync;
 use crate::database::sync_event;
 use crate::database::watch_history::MAX_PAGE_SIZE;
 use crate::dto::{
-    EncryptedSyncCollectionResponse, EncryptedSyncCollectionRevision, EncryptedSyncManifest,
-    PutEncryptedSync, SyncCapabilities,
+    EncryptedSyncChange, EncryptedSyncCollectionResponse, EncryptedSyncCollectionRevision,
+    EncryptedSyncManifest, PutEncryptedSync, SyncCapabilities,
 };
 use crate::handlers::session::now_ms;
 use crate::handlers::user::authenticate_session;
@@ -22,6 +22,8 @@ use diesel_async::AsyncConnection;
 const MEBIBYTE: usize = 1024 * 1024;
 const MAX_ENCRYPTED_SYNC_BYTES: usize = 64 * MEBIBYTE;
 const MAX_ENCRYPTED_SYNC_ACCOUNT_BYTES: usize = 128 * MEBIBYTE;
+/// Appended changes are meant to be small; larger edits upload the collection.
+const MAX_ENCRYPTED_SYNC_CHANGE_BYTES: usize = 256 * 1024;
 // Current clients can acknowledge saved playback speeds in settings. Older
 // clients still require the deprecated collection to resume partial migrations.
 const LEGACY_ENCRYPTED_COLLECTIONS: [&str; 5] = [
@@ -67,6 +69,7 @@ impl ScopedHandler for EncryptedSyncHandler {
             .service(get_legacy_encrypted_sync)
             .service(get_encrypted_sync_collection)
             .service(put_encrypted_sync_collection)
+            .service(append_encrypted_sync_change)
     }
 }
 
@@ -82,6 +85,7 @@ pub(crate) fn sync_capabilities() -> SyncCapabilities {
         watch_stats: 1,
         live_reminders: 1,
         live_sync: 1,
+        collection_changes: 1,
     }
 }
 
@@ -154,39 +158,84 @@ async fn get_legacy_encrypted_sync(
             collection: "legacy".to_owned(),
             revision: document.revision,
             payload: Some(document.payload),
+            ..Default::default()
         },
         None => EncryptedSyncCollectionResponse {
             collection: "legacy".to_owned(),
-            revision: 0,
-            payload: None,
+            ..Default::default()
         },
     }))
 }
 
-#[utoipa::path(responses((status = OK, body = EncryptedSyncCollectionResponse)), security(("api_jwt_token" = [])))]
+#[derive(Debug, Default, serde::Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+struct EncryptedSyncCollectionQuery {
+    /// The revision the client already holds, or 0. The response then contains
+    /// only later changes when possible, and the full payload otherwise.
+    since: Option<i64>,
+}
+
+#[utoipa::path(params(EncryptedSyncCollectionQuery), responses((status = OK, body = EncryptedSyncCollectionResponse)), security(("api_jwt_token" = [])))]
 #[get("/{collection}")]
 async fn get_encrypted_sync_collection(
     account: Account,
+    session: Option<AccountSession>,
     pool: WebData,
     collection: web::Path<String>,
+    query: web::Query<EncryptedSyncCollectionQuery>,
 ) -> HandlerResult<impl Responder> {
     let collection = collection.into_inner();
     collection_limit(&collection)?;
     let mut conn = get_db_conn!(pool);
-    let document = encrypted_sync::get(&mut conn, &account.id, &collection)
+    let Some(since) = query.since else {
+        // Clients without `since` cannot apply appended changes. A stale
+        // payload would let them revert those changes with their next upload.
+        let document = encrypted_sync::get_full(&mut conn, &account.id, &collection)
+            .await
+            .map_err(|_| HandlerError::InternalDatabaseError)?;
+        return Ok(web::Json(match document {
+            Some((revision, base_revision, _)) if revision != base_revision => {
+                return Err(HandlerError::EncryptedSyncChangesPending);
+            }
+            Some((revision, _, payload)) => EncryptedSyncCollectionResponse {
+                collection,
+                revision,
+                payload: Some(payload),
+                ..Default::default()
+            },
+            None => EncryptedSyncCollectionResponse {
+                collection,
+                ..Default::default()
+            },
+        }));
+    };
+    // Unmarked sessions only keep appends disabled.
+    if let Some(session) = session {
+        encrypted_sync::mark_session_reads_changes(&mut conn, &session.id)
+            .await
+            .map_err(|_| HandlerError::InternalDatabaseError)?;
+    }
+    let read = encrypted_sync::read_since(&mut conn, &account.id, &collection, since)
         .await
         .map_err(|_| HandlerError::InternalDatabaseError)?;
-
-    Ok(web::Json(match document {
-        Some(document) => EncryptedSyncCollectionResponse {
+    Ok(web::Json(match read {
+        Some(read) => EncryptedSyncCollectionResponse {
             collection,
-            revision: document.revision,
-            payload: Some(document.payload),
+            revision: read.revision,
+            payload: read.payload,
+            base_revision: Some(read.base_revision),
+            changes: Some(
+                read.changes
+                    .into_iter()
+                    .map(|(revision, payload)| EncryptedSyncChange { revision, payload })
+                    .collect(),
+            ),
         },
         None => EncryptedSyncCollectionResponse {
             collection,
-            revision: 0,
-            payload: None,
+            base_revision: Some(0),
+            changes: Some(Vec::new()),
+            ..Default::default()
         },
     }))
 }
@@ -249,13 +298,90 @@ async fn put_encrypted_sync_collection(
         encrypted_sync::SaveResult::QuotaExceeded => {
             return Err(HandlerError::EncryptedSyncQuotaExceeded);
         }
+        encrypted_sync::SaveResult::FullUploadRequired => {
+            return Err(HandlerError::InternalDatabaseError);
+        }
     }
 
     notify(&account.id, None);
     Ok(HttpResponse::Ok().json(EncryptedSyncCollectionResponse {
         collection,
         revision: next_revision,
-        payload: None,
+        ..Default::default()
+    }))
+}
+
+#[utoipa::path(request_body = PutEncryptedSync, responses((status = OK, body = EncryptedSyncCollectionResponse)), security(("api_jwt_token" = [])))]
+#[post("/{collection}/changes")]
+async fn append_encrypted_sync_change(
+    account: Account,
+    session: AccountSession,
+    pool: WebData,
+    collection: web::Path<String>,
+    form: web::Json<PutEncryptedSync>,
+) -> HandlerResult<impl Responder> {
+    let collection = collection.into_inner();
+    if collection == "playbackSpeeds" {
+        return Ok(HttpResponse::MethodNotAllowed()
+            .insert_header((actix_web::http::header::ALLOW, "GET"))
+            .body("playbackSpeeds is read-only; save channel playback speeds in settings"));
+    }
+    if form.payload.len() > collection_limit(&collection)?.min(MAX_ENCRYPTED_SYNC_CHANGE_BYTES)
+        || form
+            .activity
+            .as_ref()
+            .is_some_and(|payload| payload.len() > sync_event::MAX_EVENT_BYTES)
+    {
+        return Err(HandlerError::EncryptedSyncTooLarge);
+    }
+    if form.payload.is_empty()
+        || form
+            .activity
+            .as_ref()
+            .is_some_and(|payload| payload.is_empty())
+    {
+        return Err(HandlerError::ValidationError);
+    }
+    let next_revision = form
+        .revision
+        .checked_add(1)
+        .filter(|_| form.revision >= 0)
+        .ok_or(HandlerError::ValidationError)?;
+    let now = now_ms()?;
+    let mut conn = get_db_conn!(pool);
+    // Only clients that read changes append them. A client whose cache is
+    // current may not read the collection before its first append.
+    encrypted_sync::mark_session_reads_changes(&mut conn, &session.id)
+        .await
+        .map_err(|_| HandlerError::InternalDatabaseError)?;
+    match encrypted_sync::append_change(
+        &mut conn,
+        &account.id,
+        &collection,
+        form.revision,
+        &form.payload,
+        MAX_ENCRYPTED_SYNC_ACCOUNT_BYTES,
+        form.activity.as_deref().map(|payload| (payload, now)),
+        now,
+    )
+    .await
+    .map_err(|_| HandlerError::InternalDatabaseError)?
+    {
+        encrypted_sync::SaveResult::Saved => {}
+        encrypted_sync::SaveResult::Conflict => return Err(HandlerError::EncryptedSyncConflict),
+        encrypted_sync::SaveResult::QuotaExceeded => {
+            return Err(HandlerError::EncryptedSyncQuotaExceeded);
+        }
+        encrypted_sync::SaveResult::FullUploadRequired => {
+            return Err(HandlerError::EncryptedSyncFullUploadRequired);
+        }
+    }
+
+    notify(&account.id, None);
+    Ok(HttpResponse::Ok().json(EncryptedSyncCollectionResponse {
+        collection,
+        revision: next_revision,
+        ..Default::default()
     }))
 }
 
@@ -361,13 +487,14 @@ async fn send_device_request(
         // Serialize recipient validation and queue updates with session revocation.
         use diesel::prelude::*;
         use diesel_async::RunQueryDsl;
-        let locked =
-            diesel::update(crate::schema::account::table.find(&account.id).filter(
-                crate::schema::account::session_generation.eq(account.session_generation),
-            ))
-            .set(crate::schema::account::id.eq(&account.id))
-            .execute(conn)
-            .await?;
+        let locked = diesel::update(
+            crate::schema::account::table
+                .find(&account.id)
+                .filter(crate::schema::account::session_generation.eq(account.session_generation)),
+        )
+        .set(crate::schema::account::id.eq(&account.id))
+        .execute(conn)
+        .await?;
         if locked != 1 {
             return Err(diesel::result::Error::NotFound);
         }
@@ -903,5 +1030,217 @@ mod live_tests {
         )
         .await;
         assert!(messages.as_array().unwrap().is_empty());
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod change_tests {
+    use super::*;
+    use crate::database::encrypted_sync::MAX_COLLECTION_CHANGES;
+    use crate::{DbConnection, MIGRATIONS};
+    use actix_web::{App, HttpMessage, test};
+    use diesel::connection::SimpleConnection;
+    use diesel_async::pooled_connection::{AsyncDieselConnectionManager, bb8::Pool};
+    use diesel_migrations::MigrationHarness;
+    use serde_json::{Value, json};
+
+    fn session(id: &str, now: i64) -> AccountSession {
+        AccountSession {
+            id: id.into(),
+            account_id: "owner".into(),
+            device_id: id.into(),
+            encrypted_device_info: None,
+            created_at: now,
+            last_active_at: now,
+            expires_at: now + 86400000,
+            revoked_at: None,
+            legacy: false,
+            generation: 0,
+            pending_pairing: false,
+        }
+    }
+
+    #[actix_rt::test]
+    async fn appended_changes_are_read_incrementally_and_hidden_from_full_readers() {
+        let pool = Pool::builder()
+            .max_size(1)
+            .build(AsyncDieselConnectionManager::<DbConnection>::new(
+                ":memory:",
+            ))
+            .await
+            .unwrap();
+        let now = now_ms().unwrap();
+        let account = Account {
+            id: "owner".into(),
+            name_hash: "owner".into(),
+            password_hash: None,
+            oidc_sub: None,
+            legacy_tokens_enabled: false,
+            session_generation: 0,
+        };
+        let current = session("current", now);
+        let other = session("other", now);
+        {
+            let mut conn = pool.get().await.unwrap();
+            conn.spawn_blocking(|conn| {
+                conn.run_pending_migrations(MIGRATIONS).unwrap();
+                conn.batch_execute(
+                    "INSERT INTO account (id, name_hash) VALUES ('owner', 'owner');",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+            for session in [&current, &other] {
+                crate::database::account_session::create(&mut conn, session)
+                    .await
+                    .unwrap();
+            }
+        }
+        let app = test::init_service(
+            App::new().app_data(web::Data::new(pool.clone())).service(
+                web::scope("/sync")
+                    .service(get_encrypted_sync_collection)
+                    .service(put_encrypted_sync_collection)
+                    .service(append_encrypted_sync_change),
+            ),
+        )
+        .await;
+        let call = async |builder: test::TestRequest, session: &AccountSession| {
+            let request = builder.to_request();
+            request.extensions_mut().insert(account.clone());
+            request.extensions_mut().insert(session.clone());
+            let response = test::call_service(&app, request).await;
+            let status = response.status().as_u16();
+            let body = test::read_body(response).await;
+            (
+                status,
+                serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null),
+            )
+        };
+        let append = |revision: i64, payload: &str| {
+            test::TestRequest::post()
+                .uri("/sync/history/changes")
+                .set_json(json!({ "revision": revision, "payload": payload }))
+        };
+
+        // A collection must be uploaded in full before changes can follow it.
+        assert_eq!(call(append(1, "change"), &current).await.0, 412);
+        let put = test::TestRequest::put()
+            .uri("/sync/history")
+            .set_json(json!({ "revision": 0, "payload": "base" }));
+        assert_eq!(call(put, &current).await.0, 200);
+
+        // `other` has only read full collections, so it could miss a change.
+        assert_eq!(call(append(1, "change-2"), &current).await.0, 412);
+        let (status, read) = call(
+            test::TestRequest::get().uri("/sync/history?since=0"),
+            &other,
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            read,
+            json!({ "collection": "history", "revision": 1, "payload": "base", "base_revision": 1, "changes": [] })
+        );
+
+        assert_eq!(call(append(-1, "change-2"), &current).await.0, 400);
+        assert_eq!(call(append(0, "change-2"), &current).await.0, 409);
+        assert_eq!(call(append(2, "change-2"), &current).await.0, 409);
+        let (status, saved) = call(append(1, "change-2"), &current).await;
+        assert_eq!((status, saved["revision"].clone()), (200, json!(2)));
+        assert_eq!(call(append(2, "change-3"), &current).await.0, 200);
+
+        let (_, read) = call(
+            test::TestRequest::get().uri("/sync/history?since=2"),
+            &other,
+        )
+        .await;
+        assert_eq!(
+            read,
+            json!({ "collection": "history", "revision": 3, "payload": null, "base_revision": 1,
+                "changes": [{ "revision": 3, "payload": "change-3" }] })
+        );
+        let (_, read) = call(
+            test::TestRequest::get().uri("/sync/history?since=0"),
+            &other,
+        )
+        .await;
+        assert_eq!(read["payload"], "base");
+        assert_eq!(read["changes"].as_array().unwrap().len(), 2);
+        // A revision the log does not cover returns the full collection.
+        let (_, read) = call(
+            test::TestRequest::get().uri("/sync/history?since=9"),
+            &other,
+        )
+        .await;
+        assert_eq!(read["payload"], "base");
+
+        // Older clients would upload a payload without the appended changes.
+        let (status, _) = call(test::TestRequest::get().uri("/sync/history"), &other).await;
+        assert_eq!(status, 409);
+
+        // A full upload replaces the log.
+        let put = test::TestRequest::put()
+            .uri("/sync/history")
+            .set_json(json!({ "revision": 3, "payload": "compacted" }));
+        assert_eq!(call(put, &current).await.0, 200);
+        let (status, read) = call(test::TestRequest::get().uri("/sync/history"), &other).await;
+        assert_eq!(
+            (status, read),
+            (
+                200,
+                json!({ "collection": "history", "revision": 4, "payload": "compacted" })
+            )
+        );
+        let (_, read) = call(
+            test::TestRequest::get().uri("/sync/history?since=3"),
+            &other,
+        )
+        .await;
+        assert_eq!(read["payload"], "compacted");
+        assert_eq!(read["changes"], json!([]));
+
+        // A long log requires another full upload.
+        for revision in 4..4 + MAX_COLLECTION_CHANGES {
+            assert_eq!(call(append(revision, "change"), &current).await.0, 200);
+        }
+        let revision = 4 + MAX_COLLECTION_CHANGES;
+        assert_eq!(call(append(revision, "change"), &current).await.0, 412);
+
+        // Rolling back would leave the base payload at the newer revision.
+        let reverted = pool
+            .get()
+            .await
+            .unwrap()
+            .spawn_blocking(|conn| {
+                Ok(conn
+                    .revert_last_migration(MIGRATIONS)
+                    .map_err(|error| error.to_string()))
+            })
+            .await
+            .unwrap();
+        assert!(
+            reverted
+                .unwrap_err()
+                .contains("encrypted_sync_changes_must_be_uploaded_in_full")
+        );
+
+        // A new session from an older client, or from an unused legacy token
+        // (enabled for this account), blocks further appends.
+        let older = session("older", now);
+        crate::database::account_session::create(&mut pool.get().await.unwrap(), &older)
+            .await
+            .unwrap();
+        let put = test::TestRequest::put()
+            .uri("/sync/history")
+            .set_json(json!({ "revision": revision, "payload": "compacted-again" }));
+        assert_eq!(call(put, &current).await.0, 200);
+        assert_eq!(call(append(revision + 1, "change"), &current).await.0, 412);
+        let (status, read) = call(test::TestRequest::get().uri("/sync/history"), &older).await;
+        assert_eq!(
+            (status, read["payload"].clone()),
+            (200, json!("compacted-again"))
+        );
     }
 }

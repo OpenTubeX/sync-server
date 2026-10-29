@@ -5,15 +5,35 @@ use crate::DbConnection;
 use crate::database::DbError;
 use crate::models::EncryptedSync;
 use crate::schema::encrypted_sync::dsl::{
-    account_id, collection, encrypted_sync, payload as encrypted_payload,
+    account_id, base_revision, collection, encrypted_sync, payload as encrypted_payload,
     revision as encrypted_revision,
 };
+use crate::schema::encrypted_sync_change;
+
+/// Appends allowed before a client must upload the full collection again.
+pub const MAX_COLLECTION_CHANGES: i64 = 64;
+/// A change log may grow to the size of its collection, but small collections
+/// may still collect this many bytes before a full upload is required.
+const MIN_CHANGE_LOG_BYTES: i64 = 1024 * 1024;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SaveResult {
     Saved,
     Conflict,
     QuotaExceeded,
+    /// Changes cannot be appended; the client must upload the full collection.
+    FullUploadRequired,
+}
+
+/// A collection read for a client that may already hold an older revision.
+#[derive(Debug, PartialEq, Eq)]
+pub struct CollectionRead {
+    pub revision: i64,
+    pub base_revision: i64,
+    /// Omitted when the caller's revision is covered by `changes`.
+    pub payload: Option<String>,
+    /// Changes after the returned payload or the caller's revision, in order.
+    pub changes: Vec<(i64, String)>,
 }
 
 #[derive(QueryableByName)]
@@ -30,6 +50,10 @@ struct StoredCollection {
     revision: i64,
     #[diesel(sql_type = diesel::sql_types::BigInt)]
     bytes: i64,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    change_bytes: i64,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    changes: i64,
 }
 
 #[derive(QueryableByName)]
@@ -45,7 +69,11 @@ async fn get_stored_collection(
     collection_name: &str,
 ) -> Result<Option<StoredCollection>, DbError> {
     diesel::sql_query(
-        "SELECT revision, CAST(LENGTH(CAST(payload AS BLOB)) AS BIGINT) AS bytes \
+        "SELECT revision, CAST(LENGTH(CAST(payload AS BLOB)) AS BIGINT) AS bytes, \
+         CAST((SELECT COALESCE(SUM(LENGTH(CAST(change.payload AS BLOB))), 0) FROM encrypted_sync_change change \
+           WHERE change.account_id = encrypted_sync.account_id AND change.collection = encrypted_sync.collection) AS BIGINT) AS change_bytes, \
+         CAST((SELECT COUNT(*) FROM encrypted_sync_change change \
+           WHERE change.account_id = encrypted_sync.account_id AND change.collection = encrypted_sync.collection) AS BIGINT) AS changes \
          FROM encrypted_sync WHERE account_id = ? AND collection = ?",
     )
     .bind::<diesel::sql_types::Text, _>(owner_id)
@@ -62,7 +90,11 @@ async fn get_stored_collection(
     collection_name: &str,
 ) -> Result<Option<StoredCollection>, DbError> {
     diesel::sql_query(
-        "SELECT revision, OCTET_LENGTH(payload)::BIGINT AS bytes \
+        "SELECT revision, OCTET_LENGTH(payload)::BIGINT AS bytes, \
+         (SELECT COALESCE(SUM(OCTET_LENGTH(change.payload)), 0) FROM encrypted_sync_change change \
+           WHERE change.account_id = encrypted_sync.account_id AND change.collection = encrypted_sync.collection)::BIGINT AS change_bytes, \
+         (SELECT COUNT(*) FROM encrypted_sync_change change \
+           WHERE change.account_id = encrypted_sync.account_id AND change.collection = encrypted_sync.collection)::BIGINT AS changes \
          FROM encrypted_sync WHERE account_id = $1 AND collection = $2",
     )
     .bind::<diesel::sql_types::Text, _>(owner_id)
@@ -75,9 +107,10 @@ async fn get_stored_collection(
 #[cfg(feature = "sqlite")]
 async fn get_stored_bytes(conn: &mut DbConnection, owner_id: &str) -> Result<i64, DbError> {
     diesel::sql_query(
-        "SELECT CAST(COALESCE(SUM(LENGTH(CAST(payload AS BLOB))), 0) AS BIGINT) AS bytes \
-         FROM encrypted_sync WHERE account_id = ?",
+        "SELECT CAST(COALESCE((SELECT SUM(LENGTH(CAST(payload AS BLOB))) FROM encrypted_sync WHERE account_id = ?), 0) \
+         + COALESCE((SELECT SUM(LENGTH(CAST(payload AS BLOB))) FROM encrypted_sync_change WHERE account_id = ?), 0) AS BIGINT) AS bytes",
     )
+    .bind::<diesel::sql_types::Text, _>(owner_id)
     .bind::<diesel::sql_types::Text, _>(owner_id)
     .get_result::<StoredBytes>(conn)
     .await
@@ -106,26 +139,13 @@ fn exceeds_storage_quota(
 #[cfg(feature = "postgres")]
 async fn get_stored_bytes(conn: &mut DbConnection, owner_id: &str) -> Result<i64, DbError> {
     diesel::sql_query(
-        "SELECT COALESCE(SUM(OCTET_LENGTH(payload)), 0)::BIGINT AS bytes \
-         FROM encrypted_sync WHERE account_id = $1",
+        "SELECT (COALESCE((SELECT SUM(OCTET_LENGTH(payload)) FROM encrypted_sync WHERE account_id = $1), 0) \
+         + COALESCE((SELECT SUM(OCTET_LENGTH(payload)) FROM encrypted_sync_change WHERE account_id = $1), 0))::BIGINT AS bytes",
     )
     .bind::<diesel::sql_types::Text, _>(owner_id)
     .get_result::<StoredBytes>(conn)
     .await
     .map(|result| result.bytes)
-}
-
-pub async fn get(
-    conn: &mut DbConnection,
-    owner_id: &str,
-    collection_name: &str,
-) -> Result<Option<EncryptedSync>, DbError> {
-    encrypted_sync
-        .filter(account_id.eq(owner_id).and(collection.eq(collection_name)))
-        .select(EncryptedSync::as_select())
-        .first(conn)
-        .await
-        .optional()
 }
 
 pub async fn exists(conn: &mut DbConnection, owner_id: &str) -> Result<bool, DbError> {
@@ -156,7 +176,7 @@ pub async fn get_legacy_encrypted(
 
 pub async fn create(conn: &mut DbConnection, document: &EncryptedSync) -> Result<(), DbError> {
     diesel::insert_into(encrypted_sync)
-        .values(document)
+        .values((document, base_revision.eq(document.revision)))
         .execute(conn)
         .await?;
     Ok(())
@@ -203,7 +223,9 @@ pub async fn save(
         }
 
         let stored_bytes = get_stored_bytes(conn, owner_id).await?;
-        let previous_bytes = existing.as_ref().map_or(0, |document| document.bytes);
+        let previous_bytes = existing.as_ref().map_or(0, |document| {
+            document.bytes.saturating_add(document.change_bytes)
+        });
         if exceeds_storage_quota(
             stored_bytes,
             previous_bytes,
@@ -221,8 +243,17 @@ pub async fn save(
             )
             .set((
                 encrypted_revision.eq(expected_revision + 1),
+                base_revision.eq(expected_revision + 1),
                 encrypted_payload.eq(new_payload),
             ))
+            .execute(conn)
+            .await?;
+            // The full payload includes every appended change.
+            diesel::delete(
+                encrypted_sync_change::table
+                    .filter(encrypted_sync_change::account_id.eq(owner_id))
+                    .filter(encrypted_sync_change::collection.eq(collection_name)),
+            )
             .execute(conn)
             .await?;
         } else {
@@ -238,6 +269,220 @@ pub async fn save(
             .await?;
             clear_legacy_collection(conn, owner_id, collection_name).await?;
         }
+
+        if let Some((payload, now)) = activity {
+            crate::database::sync_event::append(conn, owner_id, "", payload, now).await?;
+        }
+        Ok(SaveResult::Saved)
+    })
+    .await
+}
+
+/// Read a collection for a client holding revision `since`. When the change log
+/// covers that revision, only the later changes are returned. Otherwise the
+/// full payload is returned with every change appended after it.
+pub async fn read_since(
+    conn: &mut DbConnection,
+    owner_id: &str,
+    collection_name: &str,
+    since: i64,
+) -> Result<Option<CollectionRead>, DbError> {
+    // PostgreSQL reads each statement at its own snapshot, so a concurrent full
+    // upload can clear the change log between them. Retry inconsistent reads.
+    for _ in 0..3 {
+        let read = conn
+            .transaction(async |conn| {
+                let Some((revision, base)) = encrypted_sync
+                    .filter(account_id.eq(owner_id).and(collection.eq(collection_name)))
+                    .select((encrypted_revision, base_revision))
+                    .first::<(i64, i64)>(conn)
+                    .await
+                    .optional()?
+                else {
+                    return Ok(Some(None));
+                };
+                let incremental = since >= base && since <= revision;
+                let payload = if incremental {
+                    None
+                } else {
+                    Some(
+                        encrypted_sync
+                            .filter(account_id.eq(owner_id).and(collection.eq(collection_name)))
+                            .filter(encrypted_revision.eq(revision))
+                            .select(encrypted_payload)
+                            .first::<String>(conn)
+                            .await
+                            .optional()?,
+                    )
+                };
+                let first = if incremental { since } else { base };
+                let changes: Vec<(i64, String)> = encrypted_sync_change::table
+                    .filter(encrypted_sync_change::account_id.eq(owner_id))
+                    .filter(encrypted_sync_change::collection.eq(collection_name))
+                    .filter(encrypted_sync_change::revision.gt(first))
+                    .filter(encrypted_sync_change::revision.le(revision))
+                    .order(encrypted_sync_change::revision.asc())
+                    .select((
+                        encrypted_sync_change::revision,
+                        encrypted_sync_change::payload,
+                    ))
+                    .load(conn)
+                    .await?;
+                let contiguous = changes
+                    .iter()
+                    .map(|(change, _)| *change)
+                    .eq((first + 1)..=revision);
+                Ok::<_, DbError>(match (payload, contiguous) {
+                    (Some(None), _) | (_, false) => None,
+                    (payload, true) => Some(Some(CollectionRead {
+                        revision,
+                        base_revision: base,
+                        payload: payload.flatten(),
+                        changes,
+                    })),
+                })
+            })
+            .await?;
+        if let Some(read) = read {
+            return Ok(read);
+        }
+    }
+    Err(diesel::result::Error::RollbackTransaction)
+}
+
+/// The revision, base revision and full payload, read together so a concurrent
+/// append cannot pair an older payload with a newer revision.
+pub async fn get_full(
+    conn: &mut DbConnection,
+    owner_id: &str,
+    collection_name: &str,
+) -> Result<Option<(i64, i64, String)>, DbError> {
+    encrypted_sync
+        .filter(account_id.eq(owner_id).and(collection.eq(collection_name)))
+        .select((encrypted_revision, base_revision, encrypted_payload))
+        .first(conn)
+        .await
+        .optional()
+}
+
+/// Record that a session reads appended changes. Appends stay disabled while
+/// any active session of the account has not.
+pub async fn mark_session_reads_changes(
+    conn: &mut DbConnection,
+    session_id: &str,
+) -> Result<(), DbError> {
+    use crate::schema::account_session::dsl::{account_session, id, reads_collection_changes};
+
+    let marked: Option<bool> = account_session
+        .find(session_id)
+        .select(reads_collection_changes)
+        .first(conn)
+        .await
+        .optional()?;
+    // Avoid a write, and with SQLite a write lock, on every read.
+    if marked == Some(false) {
+        diesel::update(account_session.filter(id.eq(session_id)))
+            .set(reads_collection_changes.eq(true))
+            .execute(conn)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Call while holding the account lock, so a concurrent password change cannot
+/// replace the sessions between this check and the append.
+async fn all_sessions_read_changes(
+    conn: &mut DbConnection,
+    owner_id: &str,
+    now: i64,
+) -> Result<bool, DbError> {
+    use crate::schema::account;
+    use crate::schema::account_session::dsl::{
+        account_id as session_account_id, account_session, expires_at, generation,
+        reads_collection_changes, revoked_at,
+    };
+    use diesel::dsl::exists;
+
+    // An unused legacy token creates its session on first use, like a new
+    // login. Until then, its reads without `since` fail instead of going stale.
+    let session_generation: i64 = account::table
+        .find(owner_id)
+        .select(account::session_generation)
+        .first(conn)
+        .await?;
+    // Provisional pairing sessions count too, as the paired device may be older.
+    let blocked: bool = diesel::select(exists(
+        account_session
+            .filter(session_account_id.eq(owner_id))
+            .filter(generation.eq(session_generation))
+            .filter(expires_at.gt(now))
+            .filter(revoked_at.is_null())
+            .filter(reads_collection_changes.eq(false)),
+    ))
+    .get_result(conn)
+    .await?;
+    Ok(!blocked)
+}
+
+/// Append one encrypted change to a collection at `expected_revision`.
+#[allow(clippy::too_many_arguments)]
+pub async fn append_change(
+    conn: &mut DbConnection,
+    owner_id: &str,
+    collection_name: &str,
+    expected_revision: i64,
+    new_payload: &str,
+    max_account_bytes: usize,
+    activity: Option<(&str, i64)>,
+    now: i64,
+) -> Result<SaveResult, DbError> {
+    conn.transaction(async |conn| {
+        use crate::schema::account;
+
+        // Serialize with full uploads and quota checks for this account.
+        diesel::update(account::table.filter(account::id.eq(owner_id)))
+            .set(account::id.eq(account::id))
+            .execute(conn)
+            .await?;
+
+        let Some(existing) = get_stored_collection(conn, owner_id, collection_name).await? else {
+            return Ok(SaveResult::FullUploadRequired);
+        };
+        if existing.revision != expected_revision {
+            return Ok(SaveResult::Conflict);
+        }
+        let Ok(new_bytes) = i64::try_from(new_payload.len()) else {
+            return Ok(SaveResult::FullUploadRequired);
+        };
+        if existing.changes >= MAX_COLLECTION_CHANGES
+            || existing.change_bytes.saturating_add(new_bytes)
+                > existing.bytes.max(MIN_CHANGE_LOG_BYTES)
+            || !all_sessions_read_changes(conn, owner_id, now).await?
+        {
+            return Ok(SaveResult::FullUploadRequired);
+        }
+        let stored_bytes = get_stored_bytes(conn, owner_id).await?;
+        if exceeds_storage_quota(stored_bytes, 0, new_payload.len(), max_account_bytes) {
+            return Ok(SaveResult::QuotaExceeded);
+        }
+
+        diesel::insert_into(encrypted_sync_change::table)
+            .values((
+                encrypted_sync_change::account_id.eq(owner_id),
+                encrypted_sync_change::collection.eq(collection_name),
+                encrypted_sync_change::revision.eq(expected_revision + 1),
+                encrypted_sync_change::payload.eq(new_payload),
+            ))
+            .execute(conn)
+            .await?;
+        diesel::update(
+            encrypted_sync
+                .filter(account_id.eq(owner_id))
+                .filter(collection.eq(collection_name)),
+        )
+        .set(encrypted_revision.eq(expected_revision + 1))
+        .execute(conn)
+        .await?;
 
         if let Some((payload, now)) = activity {
             crate::database::sync_event::append(conn, owner_id, "", payload, now).await?;
@@ -391,7 +636,11 @@ mod tests {
         let owner_id = uuid::Uuid::now_v7().to_string();
         let result: Result<(), diesel::result::Error> = conn
             .transaction(async |conn| {
-                assert!(super::get_legacy_encrypted(conn, &owner_id).await?.is_none());
+                assert!(
+                    super::get_legacy_encrypted(conn, &owner_id)
+                        .await?
+                        .is_none()
+                );
                 account::insert_new_account(
                     conn,
                     &Account {
