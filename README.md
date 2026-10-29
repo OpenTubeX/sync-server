@@ -298,7 +298,10 @@ stores a new full payload and clears the change log.
 Clients that read without `since` cannot apply changes. While a collection has
 pending changes, such reads fail with HTTP 409. To prevent that, an append
 returns HTTP 412 unless every active session of the account has read with
-`since`, and the account accepts no unused legacy tokens. It also returns 412
+`since` or appended a change. An older client that signs in, or uses a legacy
+token for the first time, adds a session that blocks appends; until another
+client uploads the full collection, its reads fail instead of returning stale
+data. An append also returns 412
 when the collection has never been fully uploaded, already holds 64 changes, or
 when its changes would exceed the size of the full payload (with a 1 MiB
 minimum). Clients then upload the full collection instead. Each change can be

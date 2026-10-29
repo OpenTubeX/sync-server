@@ -190,20 +190,17 @@ async fn get_encrypted_sync_collection(
     let Some(since) = query.since else {
         // Clients without `since` cannot apply appended changes. A stale
         // payload would let them revert those changes with their next upload.
-        if encrypted_sync::has_changes(&mut conn, &account.id, &collection)
-            .await
-            .map_err(|_| HandlerError::InternalDatabaseError)?
-        {
-            return Err(HandlerError::EncryptedSyncChangesPending);
-        }
-        let document = encrypted_sync::get(&mut conn, &account.id, &collection)
+        let document = encrypted_sync::get_full(&mut conn, &account.id, &collection)
             .await
             .map_err(|_| HandlerError::InternalDatabaseError)?;
         return Ok(web::Json(match document {
-            Some(document) => EncryptedSyncCollectionResponse {
+            Some((revision, base_revision, _)) if revision != base_revision => {
+                return Err(HandlerError::EncryptedSyncChangesPending);
+            }
+            Some((revision, _, payload)) => EncryptedSyncCollectionResponse {
                 collection,
-                revision: document.revision,
-                payload: Some(document.payload),
+                revision,
+                payload: Some(payload),
                 ..Default::default()
             },
             None => EncryptedSyncCollectionResponse {
@@ -348,16 +345,18 @@ async fn append_encrypted_sync_change(
     let next_revision = form
         .revision
         .checked_add(1)
-        .filter(|_| form.revision > 0)
+        .filter(|_| form.revision >= 0)
         .ok_or(HandlerError::ValidationError)?;
     let now = now_ms()?;
     let mut conn = get_db_conn!(pool);
+    // Only clients that read changes append them. A client whose cache is
+    // current may not read the collection before its first append.
     encrypted_sync::mark_session_reads_changes(&mut conn, &session.id)
         .await
         .map_err(|_| HandlerError::InternalDatabaseError)?;
     match encrypted_sync::append_change(
         &mut conn,
-        &account,
+        &account.id,
         &collection,
         form.revision,
         &form.payload,
@@ -1145,7 +1144,8 @@ mod change_tests {
             json!({ "collection": "history", "revision": 1, "payload": "base", "base_revision": 1, "changes": [] })
         );
 
-        assert_eq!(call(append(0, "change-2"), &current).await.0, 400);
+        assert_eq!(call(append(-1, "change-2"), &current).await.0, 400);
+        assert_eq!(call(append(0, "change-2"), &current).await.0, 409);
         assert_eq!(call(append(2, "change-2"), &current).await.0, 409);
         let (status, saved) = call(append(1, "change-2"), &current).await;
         assert_eq!((status, saved["revision"].clone()), (200, json!(2)));
@@ -1208,7 +1208,26 @@ mod change_tests {
         let revision = 4 + MAX_COLLECTION_CHANGES;
         assert_eq!(call(append(revision, "change"), &current).await.0, 412);
 
-        // A new session from an older client blocks further appends.
+        // Rolling back would leave the base payload at the newer revision.
+        let reverted = pool
+            .get()
+            .await
+            .unwrap()
+            .spawn_blocking(|conn| {
+                Ok(conn
+                    .revert_last_migration(MIGRATIONS)
+                    .map_err(|error| error.to_string()))
+            })
+            .await
+            .unwrap();
+        assert!(
+            reverted
+                .unwrap_err()
+                .contains("encrypted_sync_changes_must_be_uploaded_in_full")
+        );
+
+        // A new session from an older client, or from an unused legacy token
+        // (enabled for this account), blocks further appends.
         let older = session("older", now);
         crate::database::account_session::create(&mut pool.get().await.unwrap(), &older)
             .await

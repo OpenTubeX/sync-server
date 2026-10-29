@@ -148,19 +148,6 @@ async fn get_stored_bytes(conn: &mut DbConnection, owner_id: &str) -> Result<i64
     .map(|result| result.bytes)
 }
 
-pub async fn get(
-    conn: &mut DbConnection,
-    owner_id: &str,
-    collection_name: &str,
-) -> Result<Option<EncryptedSync>, DbError> {
-    encrypted_sync
-        .filter(account_id.eq(owner_id).and(collection.eq(collection_name)))
-        .select(EncryptedSync::as_select())
-        .first(conn)
-        .await
-        .optional()
-}
-
 pub async fn exists(conn: &mut DbConnection, owner_id: &str) -> Result<bool, DbError> {
     use diesel::dsl::exists as query_exists;
 
@@ -363,21 +350,19 @@ pub async fn read_since(
     Err(diesel::result::Error::RollbackTransaction)
 }
 
-/// Whether a collection has changes that clients reading only full payloads would miss.
-pub async fn has_changes(
+/// The revision, base revision and full payload, read together so a concurrent
+/// append cannot pair an older payload with a newer revision.
+pub async fn get_full(
     conn: &mut DbConnection,
     owner_id: &str,
     collection_name: &str,
-) -> Result<bool, DbError> {
-    use diesel::dsl::exists;
-
-    diesel::select(exists(
-        encrypted_sync_change::table
-            .filter(encrypted_sync_change::account_id.eq(owner_id))
-            .filter(encrypted_sync_change::collection.eq(collection_name)),
-    ))
-    .get_result(conn)
-    .await
+) -> Result<Option<(i64, i64, String)>, DbError> {
+    encrypted_sync
+        .filter(account_id.eq(owner_id).and(collection.eq(collection_name)))
+        .select((encrypted_revision, base_revision, encrypted_payload))
+        .first(conn)
+        .await
+        .optional()
 }
 
 /// Record that a session reads appended changes. Appends stay disabled while
@@ -404,26 +389,32 @@ pub async fn mark_session_reads_changes(
     Ok(())
 }
 
+/// Call while holding the account lock, so a concurrent password change cannot
+/// replace the sessions between this check and the append.
 async fn all_sessions_read_changes(
     conn: &mut DbConnection,
-    account: &crate::models::Account,
+    owner_id: &str,
     now: i64,
 ) -> Result<bool, DbError> {
+    use crate::schema::account;
     use crate::schema::account_session::dsl::{
         account_id as session_account_id, account_session, expires_at, generation,
         reads_collection_changes, revoked_at,
     };
     use diesel::dsl::exists;
 
-    // Unused legacy tokens create their sessions only on first use.
-    if account.legacy_tokens_enabled {
-        return Ok(false);
-    }
+    // An unused legacy token creates its session on first use, like a new
+    // login. Until then, its reads without `since` fail instead of going stale.
+    let session_generation: i64 = account::table
+        .find(owner_id)
+        .select(account::session_generation)
+        .first(conn)
+        .await?;
     // Provisional pairing sessions count too, as the paired device may be older.
     let blocked: bool = diesel::select(exists(
         account_session
-            .filter(session_account_id.eq(&account.id))
-            .filter(generation.eq(account.session_generation))
+            .filter(session_account_id.eq(owner_id))
+            .filter(generation.eq(session_generation))
             .filter(expires_at.gt(now))
             .filter(revoked_at.is_null())
             .filter(reads_collection_changes.eq(false)),
@@ -437,7 +428,7 @@ async fn all_sessions_read_changes(
 #[allow(clippy::too_many_arguments)]
 pub async fn append_change(
     conn: &mut DbConnection,
-    account: &crate::models::Account,
+    owner_id: &str,
     collection_name: &str,
     expected_revision: i64,
     new_payload: &str,
@@ -445,7 +436,6 @@ pub async fn append_change(
     activity: Option<(&str, i64)>,
     now: i64,
 ) -> Result<SaveResult, DbError> {
-    let owner_id = account.id.as_str();
     conn.transaction(async |conn| {
         use crate::schema::account;
 
@@ -467,7 +457,7 @@ pub async fn append_change(
         if existing.changes >= MAX_COLLECTION_CHANGES
             || existing.change_bytes.saturating_add(new_bytes)
                 > existing.bytes.max(MIN_CHANGE_LOG_BYTES)
-            || !all_sessions_read_changes(conn, account, now).await?
+            || !all_sessions_read_changes(conn, owner_id, now).await?
         {
             return Ok(SaveResult::FullUploadRequired);
         }
