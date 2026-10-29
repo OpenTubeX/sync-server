@@ -1,6 +1,6 @@
 # OpenTubeX Sync Server Privacy Policy
 
-Last updated: September 21, 2026
+Last updated: October 29, 2026
 
 This policy applies to the public OpenTubeX sync server at
 [sync.opentubex.org](https://sync.opentubex.org), also accessible through
