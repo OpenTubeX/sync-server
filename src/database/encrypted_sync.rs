@@ -25,6 +25,12 @@ pub enum SaveResult {
     FullUploadRequired,
 }
 
+/// Collections stored before change logs existed keep `base_revision` 0,
+/// because filling it in would rewrite each row. They have no changes yet.
+fn base_or_revision(base: i64, revision: i64) -> i64 {
+    if base == 0 { revision } else { base }
+}
+
 /// A collection read for a client that may already hold an older revision.
 #[derive(Debug, PartialEq, Eq)]
 pub struct CollectionRead {
@@ -301,6 +307,7 @@ pub async fn read_since(
                 else {
                     return Ok(Some(None));
                 };
+                let base = base_or_revision(base, revision);
                 let incremental = since >= base && since <= revision;
                 let payload = if incremental {
                     None
@@ -357,12 +364,13 @@ pub async fn get_full(
     owner_id: &str,
     collection_name: &str,
 ) -> Result<Option<(i64, i64, String)>, DbError> {
-    encrypted_sync
+    Ok(encrypted_sync
         .filter(account_id.eq(owner_id).and(collection.eq(collection_name)))
         .select((encrypted_revision, base_revision, encrypted_payload))
-        .first(conn)
+        .first::<(i64, i64, String)>(conn)
         .await
-        .optional()
+        .optional()?
+        .map(|(revision, base, payload)| (revision, base_or_revision(base, revision), payload)))
 }
 
 /// Record that a session reads appended changes. Appends stay disabled while
@@ -475,14 +483,17 @@ pub async fn append_change(
             ))
             .execute(conn)
             .await?;
-        diesel::update(
-            encrypted_sync
-                .filter(account_id.eq(owner_id))
-                .filter(collection.eq(collection_name)),
-        )
-        .set(encrypted_revision.eq(expected_revision + 1))
-        .execute(conn)
-        .await?;
+        let filter = encrypted_sync
+            .filter(account_id.eq(owner_id))
+            .filter(collection.eq(collection_name));
+        let base: i64 = filter.select(base_revision).first(conn).await?;
+        diesel::update(filter)
+            .set((
+                encrypted_revision.eq(expected_revision + 1),
+                base_revision.eq(base_or_revision(base, expected_revision)),
+            ))
+            .execute(conn)
+            .await?;
 
         if let Some((payload, now)) = activity {
             crate::database::sync_event::append(conn, owner_id, "", payload, now).await?;
