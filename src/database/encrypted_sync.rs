@@ -75,8 +75,8 @@ async fn get_stored_collection(
     collection_name: &str,
 ) -> Result<Option<StoredCollection>, DbError> {
     diesel::sql_query(
-        "SELECT revision, CAST(LENGTH(CAST(payload AS BLOB)) AS BIGINT) AS bytes, \
-         CAST((SELECT COALESCE(SUM(LENGTH(CAST(change.payload AS BLOB))), 0) FROM encrypted_sync_change change \
+        "SELECT revision, CAST(OCTET_LENGTH(payload) AS BIGINT) AS bytes, \
+         CAST((SELECT COALESCE(SUM(OCTET_LENGTH(change.payload)), 0) FROM encrypted_sync_change change \
            WHERE change.account_id = encrypted_sync.account_id AND change.collection = encrypted_sync.collection) AS BIGINT) AS change_bytes, \
          CAST((SELECT COUNT(*) FROM encrypted_sync_change change \
            WHERE change.account_id = encrypted_sync.account_id AND change.collection = encrypted_sync.collection) AS BIGINT) AS changes \
@@ -113,8 +113,8 @@ async fn get_stored_collection(
 #[cfg(feature = "sqlite")]
 async fn get_stored_bytes(conn: &mut DbConnection, owner_id: &str) -> Result<i64, DbError> {
     diesel::sql_query(
-        "SELECT CAST(COALESCE((SELECT SUM(LENGTH(CAST(payload AS BLOB))) FROM encrypted_sync WHERE account_id = ?), 0) \
-         + COALESCE((SELECT SUM(LENGTH(CAST(payload AS BLOB))) FROM encrypted_sync_change WHERE account_id = ?), 0) AS BIGINT) AS bytes",
+        "SELECT CAST(COALESCE((SELECT SUM(OCTET_LENGTH(payload)) FROM encrypted_sync WHERE account_id = ?), 0) \
+         + COALESCE((SELECT SUM(OCTET_LENGTH(payload)) FROM encrypted_sync_change WHERE account_id = ?), 0) AS BIGINT) AS bytes",
     )
     .bind::<diesel::sql_types::Text, _>(owner_id)
     .bind::<diesel::sql_types::Text, _>(owner_id)
@@ -444,6 +444,21 @@ pub async fn append_change(
     activity: Option<(&str, i64)>,
     now: i64,
 ) -> Result<SaveResult, DbError> {
+    // Most accounts still have a session that cannot read changes. Answer those
+    // without the account lock, which takes the SQLite write lock. Stale
+    // revisions still get their conflict below, and the checks repeat under
+    // the lock.
+    let revision: Option<i64> = encrypted_sync
+        .filter(account_id.eq(owner_id).and(collection.eq(collection_name)))
+        .select(encrypted_revision)
+        .first(conn)
+        .await
+        .optional()?;
+    if revision == Some(expected_revision)
+        && !all_sessions_read_changes(conn, owner_id, now).await?
+    {
+        return Ok(SaveResult::FullUploadRequired);
+    }
     conn.transaction(async |conn| {
         use crate::schema::account;
 
@@ -683,6 +698,84 @@ mod tests {
             matches!(result, Err(diesel::result::Error::RollbackTransaction)),
             "unexpected lookup result: {result:?}"
         );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[actix_rt::test]
+    async fn blocked_appends_do_not_wait_for_the_write_lock() {
+        use diesel_async::SimpleAsyncConnection;
+
+        use crate::database::account_session;
+        use crate::models::{AccountSession, EncryptedSync};
+
+        let (database, mut writer) = crate::database::TestFileDatabase::new().await;
+        writer
+            .batch_execute(
+                "INSERT INTO account (id, name_hash, password_hash, oidc_sub) \
+                 VALUES ('account-a', 'hash-a', NULL, NULL);",
+            )
+            .await
+            .unwrap();
+        super::create(
+            &mut writer,
+            &EncryptedSync {
+                account_id: "account-a".to_owned(),
+                collection: "history".to_owned(),
+                revision: 1,
+                payload: "full".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+        // A session of an older client that has never read appended changes.
+        account_session::create(
+            &mut writer,
+            &AccountSession {
+                id: "old-client".to_owned(),
+                account_id: "account-a".to_owned(),
+                device_id: "old-device".to_owned(),
+                encrypted_device_info: None,
+                created_at: 100,
+                last_active_at: 100,
+                expires_at: 500_000,
+                revoked_at: None,
+                legacy: false,
+                generation: 0,
+                pending_pairing: false,
+            },
+        )
+        .await
+        .unwrap();
+        let mut reader = database.connect_without_waiting().await;
+        // Stale revisions keep the conflict response older clients expect.
+        let stale = super::append_change(
+            &mut reader,
+            "account-a",
+            "history",
+            0,
+            "change",
+            usize::MAX,
+            None,
+            1_000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(stale, super::SaveResult::Conflict);
+
+        writer.batch_execute("BEGIN IMMEDIATE;").await.unwrap();
+        let result = super::append_change(
+            &mut reader,
+            "account-a",
+            "history",
+            1,
+            "change",
+            usize::MAX,
+            None,
+            1_000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, super::SaveResult::FullUploadRequired);
     }
 
     #[test]
