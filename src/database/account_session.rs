@@ -97,14 +97,8 @@ pub async fn list_active(
     current_generation: i64,
     now: i64,
 ) -> Result<Vec<AccountSession>, DbError> {
-    diesel::delete(
-        account_session
-            .filter(account_id.eq(owner_id))
-            .filter(expires_at.le(now)),
-    )
-    .execute(conn)
-    .await?;
-
+    // Expired sessions are filtered here and removed by the hourly cleanup, so
+    // listing never waits for the SQLite write lock.
     account_session
         .filter(account_id.eq(owner_id))
         .filter(generation.eq(current_generation))
@@ -231,7 +225,7 @@ pub async fn delete_expired(conn: &mut DbConnection, now: i64) -> Result<usize, 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use diesel::connection::SimpleConnection;
-    use diesel_async::AsyncConnection;
+    use diesel_async::{AsyncConnection, SimpleAsyncConnection};
     use diesel_migrations::MigrationHarness;
 
     use super::{
@@ -320,6 +314,32 @@ mod tests {
             get_or_create(&mut conn, &session("current", 450_000, 500_000)).await,
             Err(diesel::result::Error::NotFound)
         ));
+    }
+
+    #[actix_rt::test]
+    async fn listing_sessions_does_not_wait_for_the_write_lock() {
+        let (database, mut writer) = crate::database::TestFileDatabase::new().await;
+        writer
+            .batch_execute(
+                "INSERT INTO account (id, name_hash, password_hash, oidc_sub) \
+                 VALUES ('account-a', 'hash-a', 'password', NULL);",
+            )
+            .await
+            .unwrap();
+        create(&mut writer, &session("current", 100, 500_000))
+            .await
+            .unwrap();
+        create(&mut writer, &session("expired", 100, 500))
+            .await
+            .unwrap();
+        writer.batch_execute("BEGIN IMMEDIATE;").await.unwrap();
+
+        let mut reader = database.connect_without_waiting().await;
+        let sessions = list_active(&mut reader, "account-a", 0, 1_000)
+            .await
+            .unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "current");
     }
 
     #[actix_rt::test]
