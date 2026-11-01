@@ -75,10 +75,10 @@ after their two-minute expiry.
 **Legacy compatibility.** The server retains plaintext endpoints for older or
 non-OpenTubeX clients. Current OpenTubeX clients do not use them on this public
 server. A client using these endpoints may send readable subscriptions, groups,
-playlists and bookmarks, watch history and progress, playback speeds, and
-related public YouTube metadata. Uploading the corresponding encrypted
-collection removes account-linked legacy data from the active database, but
-not immediately from existing backups.
+playlists and bookmarks, watch history and progress, and related public YouTube
+metadata. Uploading the corresponding encrypted collection removes
+account-linked legacy data from the active database, but not immediately from
+existing backups.
 
 **Request logs.** The default logger may record IP address, time, method, path,
 response status and size, duration, user agent, and referrer. Hosting, proxy,

@@ -28,31 +28,6 @@ if a later API version is introduced. The API docs at `/docs` list canonical
 Reverse proxy or WAF rules that match `/v1` paths must also cover their
 unprefixed aliases, such as `/account/delete` alongside `/v1/account/delete`.
 
-## Removed playback-speed API
-
-The dedicated `/v1/channel_playback_speeds` endpoints and their unprefixed aliases
-were removed on 1 October 2026. Uploads to the encrypted `playbackSpeeds`
-collection now return HTTP 405, so older clients cannot recreate or update it.
-Existing encrypted collections remain readable for migration. Current OpenTubeX
-clients store all saved channel preferences, including playback speeds, in the
-encrypted `settings` collection. Current clients still read existing `playbackSpeeds` data
-to migrate it into `settings`, but no longer upload the deprecated collection.
-After successfully syncing speeds into `settings`, current clients acknowledge
-this with `GET /v1/encrypted_sync?playback_speeds_in_settings=true`. For those
-requests, the deprecated collection is no longer required for migration completion.
-Requests without this acknowledgment retain the older completion rule so an
-interrupted migration can still discover speeds in the original encrypted document.
-The presence of opaque `settings` alone is not proof that speeds were migrated.
-
-The plaintext `channel_playback_speed` table is removed by migration
-`202610010000000000`. This migration requires the table to be empty and fails
-with `plaintext_playback_speeds_must_be_migrated` if any rows remain. Operators
-with remaining rows must migrate them using the previous server version before
-upgrading. Follow the backup and migration-approval process described below.
-The migration does not delete encrypted `playbackSpeeds` collections, settings,
-or original encrypted single-document records. Their migration reads remain
-available.
-
 ## Running
 It's recommended to run the app with Docker.
 
@@ -291,8 +266,6 @@ capability enables the separate `seenPosts` collection, so older clients
 syncing `seenVideos` cannot erase post marks. The `watch_stats: 1` capability
 enables the `watchStats` collection for per-device totals.
 The combined active encrypted collections for one account cannot exceed 128 MiB.
-Existing encrypted `playbackSpeeds` collections remain readable for migration,
-but uploads to that collection return HTTP 405.
 
 Capability `collection_changes: 1` lets clients upload a small encrypted change
 instead of the full collection. `POST /v1/encrypted_sync/{collection}/changes`
