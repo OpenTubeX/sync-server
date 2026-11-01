@@ -122,8 +122,7 @@ pub async fn claim(
             .optional()?;
         if let Some(session) = existing {
             let account_session =
-                crate::database::account_session::get_or_create(conn, candidate_session)
-                    .await?;
+                crate::database::account_session::get_or_create(conn, candidate_session).await?;
             return Ok(ClaimResult::Claimed {
                 pairing: Box::new(session),
                 account_session: Box::new(account_session),
