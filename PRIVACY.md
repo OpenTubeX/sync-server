@@ -1,6 +1,6 @@
 # OpenTubeX Sync Server Privacy Policy
 
-Last updated: October 29, 2026
+Last updated: November 1, 2026
 
 This policy applies to the public OpenTubeX sync server at
 [sync.opentubex.org](https://sync.opentubex.org), also accessible through
@@ -115,6 +115,14 @@ Framework and, where needed, the European Commission's Standard Contractual
 Clauses. Details are available in Cloudflare's
 [privacy policy](https://www.cloudflare.com/policies/privacy/) and
 [Data Processing Addendum](https://www.cloudflare.com/cloudflare-customer-dpa/).
+
+When you register or change your password, the server checks the new password
+against known data breaches using the
+[Pwned Passwords](https://haveibeenpwned.com/Passwords) service. It sends only
+the first five hexadecimal characters of the password's SHA-1 hash, from the
+server rather than your device, and never your password, account name, or IP
+address. The service returns a list of matching hash suffixes, so it cannot
+tell which password was checked.
 
 We may disclose data when required by applicable law or a binding legal
 request.

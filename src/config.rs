@@ -1,4 +1,5 @@
 use config::ConfigError;
+use openidconnect::{IssuerUrl, RedirectUrl};
 
 const fn default_true() -> bool {
     true
@@ -76,6 +77,62 @@ pub struct Config {
 }
 
 impl Config {
+    /// Constructs the config using the `config.toml` file and environment variables.
+    pub fn build() -> Result<Config, ConfigError> {
+        config::Config::builder()
+            .add_source(config::File::with_name("config").required(false))
+            .add_source(config::Environment::with_convert_case(config::Case::Snake))
+            .build()?
+            .try_deserialize()
+    }
+
+    /// Validates the config, collecting every problem so they can be reported at once.
+    pub fn validate(&self) -> Result<(), Vec<ConfigValidationError>> {
+        let mut errors = Vec::new();
+
+        if let Some(value) = &self.privacy_policy_url {
+            let valid = url::Url::parse(value).is_ok_and(|url| {
+                matches!(url.scheme(), "http" | "https")
+                    && url.has_host()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+            });
+            if !valid {
+                errors.push(ConfigValidationError::InvalidPrivacyPolicyUrl);
+            }
+        }
+
+        errors.extend(validate_secret("secret_key", &self.secret).err());
+        if let Some(username_secret) = self.dedicated_username_secret() {
+            errors.extend(validate_secret("username_secret", username_secret).err());
+        }
+
+        if let Some(oidc) = &self.oidc {
+            if is_placeholder(&oidc.client_id) {
+                errors.push(ConfigValidationError::DefaultSecret("oidc.client_id"));
+            }
+            if is_placeholder(&oidc.client_secret) {
+                errors.push(ConfigValidationError::DefaultSecret("oidc.client_secret"));
+            }
+            if IssuerUrl::new(oidc.provider_url.clone()).is_err() {
+                errors.push(ConfigValidationError::InvalidUrl("oidc.provider_url"));
+            }
+            if RedirectUrl::new(oidc.app_url.clone()).is_err() {
+                errors.push(ConfigValidationError::InvalidUrl("oidc.app_url"));
+            }
+        }
+
+        if self.database_url.trim().is_empty() {
+            errors.push(ConfigValidationError::InvalidUrl("database_url"));
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
     /// Secret used to derive account name hashes.
     ///
     /// Note that changing this value makes all existing accounts unreachable,
@@ -103,70 +160,48 @@ impl Config {
     }
 }
 
-fn validate_secret(name: &str, secret: &str) -> Result<(), ConfigError> {
-    if PLACEHOLDER_SECRETS.contains(&secret.to_ascii_lowercase().trim()) {
-        return Err(ConfigError::Message(format!(
-            "{name} is set to the placeholder value {secret:?}. Generate a unique secret, \
-             e.g. with `openssl rand -hex 32`, before exposing this server."
-        )));
+/// Invalid config errors.
+#[derive(thiserror::Error, Debug, PartialEq, Eq)]
+pub enum ConfigValidationError {
+    /// A secret is blank or left at a placeholder value.
+    #[error(
+        "`{0}` is unset or a placeholder value. Generate a unique secret, \
+         e.g. with `openssl rand -hex 32`, before exposing this server."
+    )]
+    DefaultSecret(&'static str),
+    /// A secret is too short to resist brute force.
+    #[error(
+        "`{0}` is too short ({1} bytes); at least {MIN_SECRET_LENGTH} are required. \
+         Generate one with `openssl rand -hex 32`."
+    )]
+    ShortSecret(&'static str, usize),
+    /// The set URL is not valid.
+    #[error("`{0}` is not a valid URL")]
+    InvalidUrl(&'static str),
+    #[error("`privacy_policy_url` must be an absolute HTTP(S) URL without credentials")]
+    InvalidPrivacyPolicyUrl,
+}
+
+fn is_placeholder(value: &str) -> bool {
+    let value = value.trim();
+    value.is_empty() || PLACEHOLDER_SECRETS.contains(&value.to_ascii_lowercase().as_str())
+}
+
+fn validate_secret(name: &'static str, secret: &str) -> Result<(), ConfigValidationError> {
+    if is_placeholder(secret) {
+        return Err(ConfigValidationError::DefaultSecret(name));
     }
 
     if secret.len() < MIN_SECRET_LENGTH {
-        return Err(ConfigError::Message(format!(
-            "{name} is too short ({} bytes); at least {MIN_SECRET_LENGTH} are required. \
-             Generate one with `openssl rand -hex 32`.",
-            secret.len()
-        )));
+        return Err(ConfigValidationError::ShortSecret(name, secret.len()));
     }
 
     Ok(())
-}
-
-fn validate_config(config: &Config) -> Result<(), ConfigError> {
-    if let Some(value) = &config.privacy_policy_url {
-        let valid = url::Url::parse(value).is_ok_and(|url| {
-            matches!(url.scheme(), "http" | "https")
-                && url.has_host()
-                && url.username().is_empty()
-                && url.password().is_none()
-        });
-        if !valid {
-            return Err(ConfigError::Message(
-                "privacy_policy_url must be an absolute HTTP(S) URL without credentials".to_owned(),
-            ));
-        }
-    }
-    validate_secret("secret_key", &config.secret)?;
-    if let Some(username_secret) = config.dedicated_username_secret() {
-        validate_secret("username_secret", username_secret)?;
-    }
-
-    Ok(())
-}
-
-pub fn build_config() -> Result<Config, ConfigError> {
-    let config: Config = config::Config::builder()
-        .add_source(config::File::with_name("config").required(false))
-        .add_source(config::Environment::with_convert_case(config::Case::Snake))
-        .build()?
-        .try_deserialize()?;
-
-    validate_config(&config)?;
-
-    if !config.has_dedicated_username_secret() {
-        log::warn!(
-            "username_secret is not set, so account name hashes are derived from secret_key. \
-             This means secret_key cannot be rotated without locking out every account. \
-             Set username_secret to the current secret_key value to pin it."
-        );
-    }
-
-    Ok(config)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, validate_config, validate_secret};
+    use super::{Config, ConfigValidationError, OidcConfig, validate_secret};
 
     fn config_with(secret: &str, username_secret: Option<&str>) -> Config {
         Config {
@@ -188,10 +223,10 @@ mod tests {
     #[test]
     fn privacy_policy_url_is_optional_and_must_be_a_web_url() {
         let mut config = config_with(STRONG, None);
-        assert!(validate_config(&config).is_ok());
+        assert!(config.validate().is_ok());
         for value in ["https://example.org/privacy", "http://localhost/privacy"] {
             config.privacy_policy_url = Some(value.to_owned());
-            assert!(validate_config(&config).is_ok());
+            assert!(config.validate().is_ok());
         }
         for value in [
             "",
@@ -201,27 +236,27 @@ mod tests {
             "https://user:secret@example.org",
         ] {
             config.privacy_policy_url = Some(value.to_owned());
-            assert!(validate_config(&config).is_err(), "{value}");
+            assert!(config.validate().is_err(), "{value}");
         }
     }
 
-    /// Asserts on the message, not just that validation failed: every
+    /// Asserts on the variant, not just that validation failed: every
     /// placeholder is also shorter than the minimum, so `is_err()` alone would
     /// still pass if the placeholder matching were removed entirely.
     #[test]
     fn placeholder_secrets_are_rejected() {
         for placeholder in [
+            "",
+            "   ",
             "changeme",
             "ChAnGeMe",
             "SomeVeryLongString64",
             "SUPERSECRET",
         ] {
-            let error = validate_secret("secret_key", placeholder)
-                .expect_err("placeholder must be rejected")
-                .to_string();
-            assert!(
-                error.contains("placeholder"),
-                "{placeholder:?} was rejected as {error:?}, not as a placeholder"
+            assert_eq!(
+                validate_secret("secret_key", placeholder),
+                Err(ConfigValidationError::DefaultSecret("secret_key")),
+                "{placeholder:?}"
             );
         }
     }
@@ -248,7 +283,7 @@ mod tests {
             let config = config_with(STRONG, Some(blank));
             assert_eq!(config.username_secret(), STRONG);
             assert!(!config.has_dedicated_username_secret());
-            assert!(validate_config(&config).is_ok());
+            assert!(config.validate().is_ok());
         }
     }
 
@@ -258,8 +293,45 @@ mod tests {
         let config = config_with(STRONG, Some(other));
         assert_eq!(config.username_secret(), other);
         assert!(config.has_dedicated_username_secret());
-        assert!(validate_config(&config).is_ok());
+        assert!(config.validate().is_ok());
 
-        assert!(validate_config(&config_with(STRONG, Some("changeme"))).is_err());
+        assert!(config_with(STRONG, Some("changeme")).validate().is_err());
+    }
+
+    #[test]
+    fn all_errors_are_reported_together() {
+        let mut config = config_with("changeme", None);
+        config.database_url = String::new();
+        config.oidc = Some(OidcConfig {
+            provider_url: "not a url".to_owned(),
+            client_id: "changeme".to_owned(),
+            client_secret: String::new(),
+            app_url: String::new(),
+            allowed_redirect_urls: Vec::new(),
+        });
+        assert_eq!(
+            config.validate(),
+            Err(vec![
+                ConfigValidationError::DefaultSecret("secret_key"),
+                ConfigValidationError::DefaultSecret("oidc.client_id"),
+                ConfigValidationError::DefaultSecret("oidc.client_secret"),
+                ConfigValidationError::InvalidUrl("oidc.provider_url"),
+                ConfigValidationError::InvalidUrl("oidc.app_url"),
+                ConfigValidationError::InvalidUrl("database_url"),
+            ])
+        );
+    }
+
+    #[test]
+    fn valid_oidc_config_is_accepted() {
+        let mut config = config_with(STRONG, None);
+        config.oidc = Some(OidcConfig {
+            provider_url: "https://auth.example.com".to_owned(),
+            client_id: "sync-server".to_owned(),
+            client_secret: STRONG.to_owned(),
+            app_url: "https://sync.example.com".to_owned(),
+            allowed_redirect_urls: Vec::new(),
+        });
+        assert!(config.validate().is_ok());
     }
 }

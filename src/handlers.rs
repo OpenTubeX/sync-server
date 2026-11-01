@@ -23,11 +23,11 @@ pub mod watch_history;
 
 #[derive(thiserror::Error, Debug)]
 pub enum HandlerError {
-    #[error("bookmark doesn't exists")]
+    #[error("bookmark doesn't exist")]
     BookmarkNotExists,
-    #[error("playlist doesn't exists")]
+    #[error("playlist doesn't exist")]
     PlaylistNotExists,
-    #[error("account doesn't exists")]
+    #[error("account doesn't exist")]
     AccountNotExists,
     #[error("not the owner of the playlist")]
     PlaylistNotOwned,
@@ -43,6 +43,8 @@ pub enum HandlerError {
     RegistrationDisabled,
     #[error("password too short (8 chars min)")]
     PasswordTooShort,
+    #[error("password is included in a data breach")]
+    PasswordBreached,
     #[error("accountname already taken")]
     AccountNameTaken,
     #[error("invalid accountname or password")]
@@ -109,6 +111,7 @@ impl ResponseError for HandlerError {
             Self::SubscribeBeforeChannelGroup => StatusCode::BAD_REQUEST,
             Self::RegistrationDisabled => StatusCode::METHOD_NOT_ALLOWED,
             Self::PasswordTooShort => StatusCode::BAD_REQUEST,
+            Self::PasswordBreached => StatusCode::BAD_REQUEST,
             Self::AccountNameTaken => StatusCode::CONFLICT,
             Self::AccountNotExists => StatusCode::NOT_FOUND,
             Self::InvalidCredentials => StatusCode::FORBIDDEN,

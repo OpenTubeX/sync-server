@@ -48,7 +48,7 @@ mod validation;
 
 const BASE_API_PATH: &str = "/v1";
 
-static CONFIG: LazyLock<config::Config> = LazyLock::new(|| match config::build_config() {
+static CONFIG: LazyLock<config::Config> = LazyLock::new(|| match config::Config::build() {
     Ok(c) => c,
     Err(e) => {
         error!("Failed to configure server: {e}");
@@ -76,6 +76,22 @@ type WebData = web::Data<DbPool>;
 #[actix_web::main]
 async fn main() -> io::Result<()> {
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
+
+    if let Err(errors) = CONFIG.validate() {
+        for error in errors {
+            log::error!("{error}");
+        }
+        log::error!("Refusing to run with invalid config");
+        std::process::exit(1);
+    }
+
+    if !CONFIG.has_dedicated_username_secret() {
+        log::warn!(
+            "username_secret is not set, so account name hashes are derived from secret_key. \
+             This means secret_key cannot be rotated without locking out every account. \
+             Set username_secret to the current secret_key value to pin it."
+        );
+    }
 
     // initialize DB pool outside `HttpServer::new` so that it is shared across all workers
     let pool = match initialize_db_pool(&CONFIG.database_url).await {

@@ -199,6 +199,15 @@ OIDC login passes the session token to its `redirect_url`, so the server only ac
 `allowed_redirect_urls`. With an empty list, OIDC login and deletion are refused. Signing in with OIDC for the
 first time creates an account, which `allow_registration = false` prevents.
 
+### External Services
+
+The server contacts these external services:
+
+- YouTube, to validate submitted channel and video metadata. Disable with `validate_submitted_metadata = false`.
+- [Have I Been Pwned](https://haveibeenpwned.com/Passwords), to reject passwords found in data breaches when
+  registering or changing a password. Only the first five hex digits of the password's SHA-1 hash are sent. If
+  the lookup fails, the password is accepted.
+
 ## API Documentation
 - Start the app, e.g. with `cargo run`.
 - The documentation can now be found at `http://localhost:8080/docs`.

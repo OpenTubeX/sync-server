@@ -12,6 +12,8 @@ use diesel::result::DatabaseErrorKind;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::LazyLock;
+use std::time::Duration;
 use utoipa_actix_web::scope;
 use uuid::Uuid;
 
@@ -247,6 +249,71 @@ pub(crate) fn new_pairing_account_session(
     )
 }
 
+const PWNED_PASSWORDS_RANGE_URL: &str = "https://api.pwnedpasswords.com/range/";
+
+/// Keeps a slow breach lookup from holding up registration and password changes.
+const PWNED_PASSWORDS_TIMEOUT: Duration = Duration::from_secs(5);
+
+static PWNED_PASSWORDS_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(PWNED_PASSWORDS_TIMEOUT)
+        .build()
+        .expect("could not build the Pwned Passwords HTTP client")
+});
+
+/// Whether the password appears in a known data breach.
+///
+/// Uses the Pwned Passwords k-anonymity range API, so only the first five hex
+/// digits of the password's SHA-1 hash leave the server. Padding hides the
+/// size of the response from observers.
+///
+/// Returns `None` when the lookup fails. Callers then accept the password, so
+/// that an outage of the third-party service does not block sign-ups.
+async fn has_password_leaked(password: &str) -> Option<bool> {
+    let hash: String = sha1::Sha1::digest(password.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect();
+    let (prefix, suffix) = hash.split_at(5);
+
+    let body = PWNED_PASSWORDS_CLIENT
+        .get(format!("{PWNED_PASSWORDS_RANGE_URL}{prefix}"))
+        .header("Add-Padding", "true")
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .inspect_err(|error| log::warn!("could not check password against breaches: {error}"))
+        .ok()?
+        .text()
+        .await
+        .inspect_err(|error| log::warn!("could not read password breach response: {error}"))
+        .ok()?;
+
+    Some(range_contains_suffix(&body, suffix))
+}
+
+/// Whether a range API response lists `suffix` with a non-zero breach count.
+/// Padding entries carry a count of zero and are ignored.
+fn range_contains_suffix(body: &str, suffix: &str) -> bool {
+    body.lines()
+        .filter_map(|line| line.trim().split_once(':'))
+        .any(|(hash, count)| {
+            hash.eq_ignore_ascii_case(suffix) && count.parse::<u64>().is_ok_and(|count| count > 0)
+        })
+}
+
+async fn validate_password_strength(password: &str) -> HandlerResult<()> {
+    if password.len() < MIN_PASSWORD_LENGTH {
+        return Err(HandlerError::PasswordTooShort);
+    }
+
+    if has_password_leaked(password).await == Some(true) {
+        return Err(HandlerError::PasswordBreached);
+    }
+
+    Ok(())
+}
+
 #[utoipa::path(responses((status = OK, body = LoginResponse)))]
 #[post("/register")]
 async fn register_account(
@@ -262,13 +329,8 @@ async fn register_account(
         return Err(HandlerError::InvalidCredentials);
     }
 
-    let mut conn = get_db_conn!(pool);
-
-    let password_length = form.password.len();
-    if password_length < MIN_PASSWORD_LENGTH {
-        return Err(HandlerError::PasswordTooShort);
-    }
     let device_id = supplied_or_random_device_id(form.device_id.as_deref())?;
+    validate_password_strength(&form.password).await?;
 
     let account = models::Account {
         id: Uuid::now_v7().to_string(),
@@ -279,6 +341,7 @@ async fn register_account(
         session_generation: 0,
     };
 
+    let mut conn = get_db_conn!(pool);
     let account = insert_new_account(&mut conn, &account)
         .await
         .map_err(|err| match err {
@@ -463,9 +526,7 @@ async fn change_password(
     if !verify_password(&form.current_password, password_hash) {
         return Err(HandlerError::InvalidCredentials);
     }
-    if form.new_password.len() < MIN_PASSWORD_LENGTH {
-        return Err(HandlerError::PasswordTooShort);
-    }
+    validate_password_strength(&form.new_password).await?;
 
     let new_password_hash = hash_password(&form.new_password);
     let replacement = new_account_session(
@@ -689,6 +750,30 @@ mod tests {
 
     use super::{PlaintextSyncExempt, rate_limit_middleware};
     use crate::rate_limit::RateLimiter;
+
+    #[actix_rt::test]
+    async fn breach_range_matches_any_positive_count() {
+        let body = "0018A45C4D1DEF81644B54AB7F969B88D65:1\r\n\
+                    00D4F6E8FA6EECAD2A3AA415EEC418D38EC:0\r\n\
+                    011053FD0102E94D6AE2F8B83D76FAF94F6:13";
+        assert!(super::range_contains_suffix(
+            body,
+            "0018A45C4D1DEF81644B54AB7F969B88D65"
+        ));
+        assert!(super::range_contains_suffix(
+            body,
+            "011053fd0102e94d6ae2f8b83d76faf94f6"
+        ));
+        // Padding entries have a count of zero.
+        assert!(!super::range_contains_suffix(
+            body,
+            "00D4F6E8FA6EECAD2A3AA415EEC418D38EC"
+        ));
+        assert!(!super::range_contains_suffix(
+            body,
+            "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+        ));
+    }
 
     #[cfg(feature = "sqlite")]
     #[actix_rt::test]
