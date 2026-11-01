@@ -64,7 +64,7 @@ pub enum HandlerError {
     #[error("encrypted sync collection is too large")]
     EncryptedSyncTooLarge,
     #[error(
-        "another device saved changes to this collection that require a newer OpenTubeX version; update OpenTubeX, or sync again after that device has synced"
+        "another device saved changes to this collection that require a newer OpenTubeX version; update OpenTubeX, or sync again after an updated device has synced new changes"
     )]
     EncryptedSyncChangesPending,
     #[error("upload the full encrypted sync collection")]

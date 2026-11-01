@@ -15,6 +15,10 @@ pub const MAX_COLLECTION_CHANGES: i64 = 64;
 /// A change log may grow to the size of its collection, but small collections
 /// may still collect this many bytes before a full upload is required.
 const MIN_CHANGE_LOG_BYTES: i64 = 1024 * 1024;
+/// Sessions idle this long no longer keep appends disabled. If such a device
+/// returns, its activity blocks appends again, and its full reads fail until
+/// another device uploads the full collection.
+const APPEND_BLOCKER_IDLE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SaveResult {
@@ -374,7 +378,7 @@ pub async fn get_full(
 }
 
 /// Record that a session reads appended changes. Appends stay disabled while
-/// any active session of the account has not.
+/// any recently active session of the account has not.
 pub async fn mark_session_reads_changes(
     conn: &mut DbConnection,
     session_id: &str,
@@ -406,7 +410,7 @@ async fn all_sessions_read_changes(
 ) -> Result<bool, DbError> {
     use crate::schema::account;
     use crate::schema::account_session::dsl::{
-        account_id as session_account_id, account_session, expires_at, generation,
+        account_id as session_account_id, account_session, expires_at, generation, last_active_at,
         reads_collection_changes, revoked_at,
     };
     use diesel::dsl::exists;
@@ -425,6 +429,7 @@ async fn all_sessions_read_changes(
             .filter(generation.eq(session_generation))
             .filter(expires_at.gt(now))
             .filter(revoked_at.is_null())
+            .filter(last_active_at.gt(now.saturating_sub(APPEND_BLOCKER_IDLE_MS)))
             .filter(reads_collection_changes.eq(false)),
     ))
     .get_result(conn)
@@ -776,6 +781,82 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(result, super::SaveResult::FullUploadRequired);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[actix_rt::test]
+    async fn idle_sessions_do_not_block_appends() {
+        use diesel_async::SimpleAsyncConnection;
+
+        use crate::database::account_session;
+        use crate::models::{AccountSession, EncryptedSync};
+
+        let (_database, mut conn) = crate::database::TestFileDatabase::new().await;
+        conn.batch_execute(
+            "INSERT INTO account (id, name_hash, password_hash, oidc_sub) \
+             VALUES ('account-a', 'hash-a', NULL, NULL);",
+        )
+        .await
+        .unwrap();
+        super::create(
+            &mut conn,
+            &EncryptedSync {
+                account_id: "account-a".to_owned(),
+                collection: "history".to_owned(),
+                revision: 1,
+                payload: "full".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+        let now = 100 * 24 * 60 * 60 * 1000;
+        let idle_since = now - super::APPEND_BLOCKER_IDLE_MS;
+        // An older client that has never read appended changes, last used
+        // exactly at the cutoff.
+        account_session::create(
+            &mut conn,
+            &AccountSession {
+                id: "old-client".to_owned(),
+                account_id: "account-a".to_owned(),
+                device_id: "old-device".to_owned(),
+                encrypted_device_info: None,
+                created_at: idle_since,
+                last_active_at: idle_since,
+                expires_at: now * 2,
+                revoked_at: None,
+                legacy: false,
+                generation: 0,
+                pending_pairing: false,
+            },
+        )
+        .await
+        .unwrap();
+        let append = async |conn: &mut crate::DbConnection, revision: i64, now: i64| {
+            super::append_change(
+                conn,
+                "account-a",
+                "history",
+                revision,
+                "change",
+                usize::MAX,
+                None,
+                now,
+            )
+            .await
+            .unwrap()
+        };
+        assert_eq!(append(&mut conn, 1, now).await, super::SaveResult::Saved);
+
+        // Once the device is used again, it could miss the next change.
+        assert!(
+            account_session::touch(&mut conn, "old-client", 0, idle_since, now)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            append(&mut conn, 2, now).await,
+            super::SaveResult::FullUploadRequired
+        );
     }
 
     #[test]
