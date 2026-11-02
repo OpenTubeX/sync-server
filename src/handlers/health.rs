@@ -57,6 +57,7 @@ mod tests {
                     actix_web::test::call_and_read_body_json(&app, request).await;
                 assert_eq!(json["status"], "ok");
                 assert_eq!(json["capabilities"]["encrypted_sync"], 1);
+                assert_eq!(json["capabilities"]["external_media_positions"], 1);
                 match &policy {
                     Some(url) => assert_eq!(json["privacy_policy_url"], *url),
                     None => assert!(json.get("privacy_policy_url").is_none()),

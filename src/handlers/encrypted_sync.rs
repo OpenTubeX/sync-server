@@ -84,6 +84,7 @@ pub(crate) fn sync_capabilities() -> SyncCapabilities {
         seen_posts: 1,
         watch_stats: 1,
         live_reminders: 1,
+        external_media_positions: 1,
         live_sync: 1,
         collection_changes: 1,
     }
@@ -96,6 +97,8 @@ fn collection_limit(collection: &str) -> HandlerResult<usize> {
         "sessions" | "sessionsV2" | "profiles" | "playbackSpeeds" => Ok(8 * MEBIBYTE),
         // Per-device watch time totals are merged by clients.
         "watchStats" | "liveReminders" => Ok(8 * MEBIBYTE),
+        // Playback positions of media opened by URL instead of from YouTube.
+        "externalMediaPositions" => Ok(16 * MEBIBYTE),
         "subscriptions" | "playlistBookmarks" | "seenVideos" | "seenPosts" => Ok(16 * MEBIBYTE),
         "playlists" | "history" => Ok(MAX_ENCRYPTED_SYNC_BYTES),
         _ => Err(HandlerError::ValidationErrorWithContext(
@@ -565,6 +568,11 @@ mod tests {
         assert_eq!(collection_limit("seenVideos").unwrap(), 16 * MEBIBYTE);
         assert_eq!(collection_limit("watchStats").unwrap(), 8 * MEBIBYTE);
         assert_eq!(collection_limit("liveReminders").unwrap(), 8 * MEBIBYTE);
+        assert_eq!(
+            collection_limit("externalMediaPositions").unwrap(),
+            16 * MEBIBYTE
+        );
+        assert_eq!(super::sync_capabilities().external_media_positions, 1);
         assert_eq!(super::sync_capabilities().live_reminders, 1);
         assert_eq!(super::sync_capabilities().watch_stats, 1);
         assert_eq!(super::sync_capabilities().seen_videos, 1);
