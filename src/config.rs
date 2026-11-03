@@ -32,8 +32,29 @@ pub struct OidcConfig {
     pub app_url: String,
     /// Client URLs the OIDC flows may redirect back to. Login passes the session
     /// token to this URL, so only list clients you trust.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_list")]
     pub allowed_redirect_urls: Vec<String>,
+}
+
+/// Accepts a list, or a comma-separated string so that lists can be set
+/// through environment variables.
+fn string_list<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum StringList {
+        List(Vec<String>),
+        Joined(String),
+    }
+
+    Ok(match serde::Deserialize::deserialize(deserializer)? {
+        StringList::List(list) => list,
+        StringList::Joined(joined) => joined
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(str::to_owned)
+            .collect(),
+    })
 }
 
 #[derive(serde::Deserialize, Clone)]
@@ -81,7 +102,7 @@ impl Config {
     pub fn build() -> Result<Config, ConfigError> {
         config::Config::builder()
             .add_source(config::File::with_name("config").required(false))
-            .add_source(config::Environment::with_convert_case(config::Case::Snake))
+            .add_source(environment())
             .build()?
             .try_deserialize()
     }
@@ -160,6 +181,12 @@ impl Config {
     }
 }
 
+/// Environment variable source. Nested options use `__` as the separator,
+/// e.g. `OIDC__CLIENT_ID` for `oidc.client_id`.
+fn environment() -> config::Environment {
+    config::Environment::with_convert_case(config::Case::Snake).separator("__")
+}
+
 /// Invalid config errors.
 #[derive(thiserror::Error, Debug, PartialEq, Eq)]
 pub enum ConfigValidationError {
@@ -201,7 +228,7 @@ fn validate_secret(name: &'static str, secret: &str) -> Result<(), ConfigValidat
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, ConfigValidationError, OidcConfig, validate_secret};
+    use super::{Config, ConfigValidationError, OidcConfig, environment, validate_secret};
 
     fn config_with(secret: &str, username_secret: Option<&str>) -> Config {
         Config {
@@ -333,5 +360,87 @@ mod tests {
             allowed_redirect_urls: Vec::new(),
         });
         assert!(config.validate().is_ok());
+    }
+
+    /// Builds a config from the given variables instead of the process
+    /// environment, so tests cannot race on shared state.
+    fn config_from_env(vars: &[(&str, &str)]) -> Config {
+        let vars = vars
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect();
+        config::Config::builder()
+            .add_source(environment().source(Some(vars)))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap()
+    }
+
+    #[test]
+    fn environment_variables_configure_nested_oidc_options() {
+        let config = config_from_env(&[
+            ("SECRET_KEY", STRONG),
+            ("DATABASE_URL", "./data/db.sqlite"),
+            ("ALLOW_REGISTRATION", "false"),
+            ("TRUSTED_PROXY_HOPS", "2"),
+            ("OIDC__PROVIDER_URL", "https://auth.example.com"),
+            ("OIDC__CLIENT_ID", "sync-server"),
+            ("OIDC__CLIENT_SECRET", STRONG),
+            ("OIDC__APP_URL", "https://sync.example.com"),
+            (
+                "OIDC__ALLOWED_REDIRECT_URLS",
+                "myapp://oidc, https://app.example.com/oidc",
+            ),
+        ]);
+
+        assert_eq!(config.secret, STRONG);
+        assert_eq!(config.database_url, "./data/db.sqlite");
+        assert!(!config.allow_registration);
+        assert_eq!(config.trusted_proxy_hops, 2);
+        let oidc = config.oidc.expect("OIDC__* variables should set `oidc`");
+        assert_eq!(oidc.provider_url, "https://auth.example.com");
+        assert_eq!(oidc.client_id, "sync-server");
+        assert_eq!(oidc.client_secret, STRONG);
+        assert_eq!(oidc.app_url, "https://sync.example.com");
+        assert_eq!(
+            oidc.allowed_redirect_urls,
+            ["myapp://oidc", "https://app.example.com/oidc"]
+        );
+    }
+
+    /// Variables override single options of a `config.toml` section, and the
+    /// file's TOML array form for lists keeps working.
+    #[test]
+    fn environment_variables_override_the_config_file() {
+        let file = r#"
+            secret_key = "from-file"
+            database_url = "./db.sqlite"
+
+            [oidc]
+            provider_url = "https://auth.example.com"
+            client_id = "from-file"
+            client_secret = "from-file"
+            app_url = "https://sync.example.com"
+            allowed_redirect_urls = ["myapp://oidc", "https://app.example.com/oidc"]
+        "#;
+        let vars = [("OIDC__CLIENT_ID".to_owned(), "from-env".to_owned())]
+            .into_iter()
+            .collect();
+        let config: Config = config::Config::builder()
+            .add_source(config::File::from_str(file, config::FileFormat::Toml))
+            .add_source(environment().source(Some(vars)))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+
+        let oidc = config.oidc.unwrap();
+        assert_eq!(oidc.client_id, "from-env");
+        assert_eq!(oidc.client_secret, "from-file");
+        assert_eq!(
+            oidc.allowed_redirect_urls,
+            ["myapp://oidc", "https://app.example.com/oidc"]
+        );
     }
 }

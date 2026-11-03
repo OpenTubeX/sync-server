@@ -104,6 +104,9 @@ impl RateLimiter {
     }
 
     /// Record a request from `client` and report whether it is permitted.
+    ///
+    /// Every attempt counts, including failed ones. Counting only successful
+    /// requests would leave failed logins, and so password guessing, unlimited.
     pub fn check(&self, client: IpAddr) -> bool {
         let now = Instant::now();
         let mut windows = self.windows.lock().expect("rate limiter mutex poisoned");
