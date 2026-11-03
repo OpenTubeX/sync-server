@@ -163,6 +163,8 @@ environment variables, to let users sign in through an OpenID Connect provider.
 All options except `allowed_redirect_urls` are required. As an environment
 variable, `allowed_redirect_urls` takes a comma-separated list, e.g.
 `OIDC__ALLOWED_REDIRECT_URLS=myapp://oidc,https://app.example.com/oidc`.
+With the Compose quick start, add the variables to the service's `environment`
+list. Compose doesn't pass entries in `.env` to the container on its own.
 
 | Option                  | Description                                              | Example                    |
 | ----------------------- | -------------------------------------------------------- | -------------------------- |
