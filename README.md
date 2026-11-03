@@ -65,6 +65,8 @@ The public instance's privacy policy is in [PRIVACY.md](./PRIVACY.md).
 
 Set options in a `config.toml` in the server's working directory, or as
 environment variables (case-insensitive, e.g. `ALLOW_REGISTRATION=false`).
+Environment variables override `config.toml`. For options inside a section, join
+the names with `__`, e.g. `OIDC__CLIENT_ID` for `client_id` in `[oidc]`.
 [config.dev.toml](./config.dev.toml) is an annotated example.
 
 | Option                        | Description                                                                          | Default      |
@@ -156,9 +158,11 @@ The server never migrates an existing database on its own. To upgrade:
 
 ### OIDC
 
-Add an `[oidc]` section to `config.toml` to let users sign in through an
-OpenID Connect provider. All options except `allowed_redirect_urls` are
-required.
+Add an `[oidc]` section to `config.toml`, or set the matching `OIDC__*`
+environment variables, to let users sign in through an OpenID Connect provider.
+All options except `allowed_redirect_urls` are required. As an environment
+variable, `allowed_redirect_urls` takes a comma-separated list, e.g.
+`OIDC__ALLOWED_REDIRECT_URLS=myapp://oidc,https://app.example.com/oidc`.
 
 | Option                  | Description                                              | Example                    |
 | ----------------------- | -------------------------------------------------------- | -------------------------- |
