@@ -1,351 +1,400 @@
 # OpenTubeX Sync Server
-Server to synchronize OpenTubeX data between devices, including subscriptions, playlists, watch history, profiles, sessions, and settings.
 
-OpenTubeX clients can use the encrypted sync API exposed by this server. In
-that mode all synchronized content is encrypted on the client with a separate
-privacy passphrase and the server stores opaque, revisioned collections per
-account. Documents are padded in 64 KiB blocks to reduce size leakage. The
-operator can still observe account activity, IP addresses, request timing, and
-approximate encrypted document size, but cannot read its contents.
-LibreTube-compatible plaintext endpoints remain available for older clients.
-When an account uploads its first encrypted document, its account-linked
-legacy plaintext sync records are removed. This cannot erase server backups
-that may already exist. After that first upload, plaintext sync endpoints are
-rejected for the account so an older client cannot accidentally repopulate
-readable data.
+Keeps OpenTubeX data in sync across devices: subscriptions, playlists, watch
+history, profiles, sessions, and settings.
 
-This project is based on the [LibreTube sync server](https://github.com/libre-tube/sync-server).
+Based on the [LibreTube sync server](https://github.com/libre-tube/sync-server).
 
-## API paths
+## Privacy
 
-All `/v1` API endpoints also accept the same path without `/v1`. For example,
-`DELETE /account/delete` and `GET /account/sessions` are aliases for their `/v1`
-routes. Both forms use the same handlers, authentication, validation, rate limits,
-and responses, without redirects. Unprefixed paths remain aliases for version 1
-if a later API version is introduced. The API docs at `/docs` list canonical
-`/v1` paths.
+OpenTubeX clients encrypt everything they sync with a separate privacy
+passphrase before uploading it. The server stores each collection as an opaque,
+revisioned document.
 
-Reverse proxy or WAF rules that match `/v1` paths must also cover their
-unprefixed aliases, such as `/account/delete` alongside `/v1/account/delete`.
+| The server can see                                              | The server cannot see                          |
+| --------------------------------------------------------------- | ---------------------------------------------- |
+| Account activity and request timing                             | Synced data, such as subscriptions and history |
+| Client IP addresses                                             | Device names and platforms                     |
+| Collection names and approximate size (padded to 64 KiB blocks) | The privacy passphrase or key                  |
 
-## Running
-It's recommended to run the app with Docker.
+Older clients can still use the LibreTube-compatible plaintext endpoints. Once
+an account uploads its first encrypted collection:
 
-There are multiple prebuilt Docker images, built for ARM64 and x86:
-- `ghcr.io/opentubex/sync-server:latest-postgres`: uses PostgreSQL as database backend
-- `ghcr.io/opentubex/sync-server:latest-sqlite`: uses SQLite as database backend
+- the server deletes that account's plaintext sync records (existing server
+  backups keep them)
+- plaintext sync endpoints reject the account, so an older client cannot
+  re-upload readable data
 
-For reference, please see the example `docker-compose` files at [docker-compose.yml](./docker-compose.yml) and [docker-compose.postgres.yml](./docker-compose.postgres.yml).
+The public instance's privacy policy is in [PRIVACY.md](./PRIVACY.md).
 
-After you chose the correct `docker-compose.yml` for your use case, just run `docker compose up`.
+## Self-hosting
+
+### Quick start
+
+1. Download [docker-compose.yml](./docker-compose.yml) (SQLite) or
+   [docker-compose.postgres.yml](./docker-compose.postgres.yml) (PostgreSQL).
+   Both images support ARM64 and x86:
+
+   | Image                                           | Database   |
+   | ----------------------------------------------- | ---------- |
+   | `ghcr.io/opentubex/sync-server:latest-sqlite`   | SQLite     |
+   | `ghcr.io/opentubex/sync-server:latest-postgres` | PostgreSQL |
+
+2. Create a `.env` file next to it. Use the same value for both secrets (see
+   [Secrets](#secrets)):
+
+   ```sh
+   secret=$(openssl rand -hex 32)
+   printf 'SECRET_KEY=%s\nUSERNAME_SECRET=%s\n' "$secret" "$secret" > .env
+   # PostgreSQL only:
+   echo "POSTGRES_PASSWORD=$(openssl rand -hex 32)" >> .env
+   ```
+
+3. SQLite only: let the container user (uid `10001`) write the data directory
+   (see [File permissions](#file-permissions)):
+
+   ```sh
+   mkdir -p ./data && sudo chown -R 10001:10001 ./data
+   ```
+
+4. Start the server with `docker compose up -d`. It listens on
+   `127.0.0.1:8080`.
+5. Point a reverse proxy at it. See [Reverse proxy](#reverse-proxy).
 
 ### Configuration
 
-There are two ways to configure `sync-server`
+Set options in a `config.toml` in the server's working directory, or as
+environment variables (case-insensitive, e.g. `ALLOW_REGISTRATION=false`).
+[config.dev.toml](./config.dev.toml) is an annotated example.
 
-- TOML file
-
-  If you want to use TOML, just place a `config.toml` in the working directory of the server.
-
-- Environment variables
-
-  The configuration can also be done through environment variables. Casing doesn't matter here.
-
-### Configuration Reference
-
-| Config option                   | Description                                          | Default | Example              |
-| ----------------------          | ---------------------------------------------------- | ------- | -------------------- |
-| `database_url`                  | Connection string for the database                   | None    | sqlite://./db.sql    |
-| `privacy_policy_url`            | Optional absolute HTTP(S) privacy policy URL without credentials, advertised in `/health`. Environment variable: `PRIVACY_POLICY_URL` | None | `https://example.org/privacy` |
-| `secret_key`                    | Used to sign authentication tokens. Required, min. 32 bytes | None | output of `openssl rand -hex 32` |
-| `username_secret`               | Used to derive account name hashes. Set it so that `secret_key` stays rotatable | falls back to `secret_key` | output of `openssl rand -hex 32` |
-| `trust_forwarded_for`           | Derive rate limiting and access logging client addresses from `X-Forwarded-For`. Required behind a reverse proxy | `false` | `true` |
-| `trusted_proxy_hops`            | Number of proxies in front of this server, used to pick the right `X-Forwarded-For` entry | `1` | `2` |
-| `allow_registration`            | Whether to allow registering on this server          | `true`  | `false`              |
-| `validate_submitted_metadata`   | Whether to check incoming video data against YouTube | `true`  | `false`              |
-| `migration_approval`            | Exact comma-separated pending migration versions approved for an existing database after separately verifying a backup | None | `202607211800000000` |
-
-### Running behind a reverse proxy
-
-`/account/register` and `/account/login` are rate limited per client address. That
-address is the immediate peer by default, which is only correct when the server is
-directly reachable.
-
-The example compose files publish to `127.0.0.1`, so a reverse proxy is the normal
-setup — and there every request arrives from the proxy's own address. Without
-extra configuration all clients would then share a single bucket and legitimate
-users would rate limit each other. Set `trust_forwarded_for = true` so the limit
-is applied per real client:
-
-```yaml
-environment:
-  - "TRUST_FORWARDED_FOR=true"
-```
-
-The address is taken from the *last* `X-Forwarded-For` entry, which is the one
-your proxy appended, so a client cannot pick its own bucket by sending the header
-itself. Only enable this when the server is not reachable directly, otherwise a
-client can do exactly that.
-
-Access logs use the same client address and trusted proxy hop count as rate
-limiting. When forwarded headers are not trusted, missing, or invalid, logs fall
-back to the immediate peer address.
-
-If you have more than one proxy in the chain, set `trusted_proxy_hops` to how many
-there are. Each proxy appends an entry, so with two the last one is the inner
-proxy's address rather than the client's.
-
-**Cloudflare Tunnel counts as two hops.** The Cloudflare edge adds the client
-address and `cloudflared` appends its own, so `trusted_proxy_hops = 2` is correct
-for a `cloudflared` deployment. Leaving it at `1` is worse than having no
-per-client limit: the trailing entry varies between edge addresses, so requests
-scatter across buckets and the limit becomes both bypassable and randomly
-triggered for innocent clients.
-
-Verify your value rather than assuming it. Send more than
-`MAX_REQUESTS_PER_WINDOW` failed logins from one client and check that the
-responses switch to `429` and stay there. If they alternate between `429` and
-normal responses, the resolved address is not stable and the hop count is wrong.
-
-This limiter is per process and best-effort. Rate limiting at the proxy as well
-is still recommended, and is required if you run multiple replicas.
-
-### Running as non-root
-
-The image runs as uid `10001`. A bind-mounted host directory keeps its host
-ownership and shadows the ownership set in the image, so for SQLite deployments
-prepare the data directory once before the first start:
-
-```sh
-mkdir -p ./data
-sudo chown -R 10001:10001 ./data
-```
-
-Without this the server cannot create `db.sqlite` or its WAL sidecar files. Note
-that the failure surfaces as a database connection timeout rather than an obvious
-permission error. If you are upgrading from an older image that ran as root, run
-the same command against your existing `./data` directory — this changes
-ownership only and does not touch the database contents.
-
-If you cannot use `sudo`, or your data directory is already owned by your own
-user, override the container user instead of changing ownership:
-
-```yaml
-services:
-  sync:
-    user: "1000:1000" # your own uid:gid, from `id -u`:`id -g`
-```
-
-The server only needs to write inside `/app/data`, so any uid that owns the data
-directory works. This still avoids running as root.
+| Option                        | Description                                                                          | Default      |
+| ----------------------------- | ------------------------------------------------------------------------------------ | ------------ |
+| `database_url`                | Database connection string, e.g. `./data/db.sqlite`                                  | required     |
+| `secret_key`                  | Signs authentication tokens. At least 32 bytes                                       | required     |
+| `username_secret`             | Derives account name hashes. See [Secrets](#secrets)                                 | `secret_key` |
+| `trust_forwarded_for`         | Take client addresses from `X-Forwarded-For`. See [Reverse proxy](#reverse-proxy)    | `false`      |
+| `trusted_proxy_hops`          | Number of proxies in front of the server                                             | `1`          |
+| `allow_registration`          | Allow new accounts, including first-time OIDC sign-ins                               | `true`       |
+| `validate_submitted_metadata` | Check submitted channel and video metadata against YouTube                           | `true`       |
+| `privacy_policy_url`          | HTTP(S) URL without credentials, shown to clients through `/health`                  | none         |
+| `migration_approval`          | Pending migration versions to apply. See [Database migrations](#database-migrations) | none         |
+| `oidc`                        | OpenID Connect login. See [OIDC](#oidc)                                              | disabled     |
 
 ### Secrets
 
-The server refuses to start if `secret_key` is missing, shorter than 32 bytes, or
-left at a placeholder such as `changeme`. Generate one with `openssl rand -hex 32`.
+- The server refuses to start if `secret_key` is missing, shorter than 32
+  bytes, or a placeholder such as `changeme`.
+- Accounts are looked up by `HMAC(username)`. Changing the secret behind that
+  hash locks every account out.
+- Set `username_secret` to the initial `secret_key` value. You can then rotate
+  `secret_key` later, for example after a leak, without locking anyone out.
+  Never change `username_secret`.
 
-Accounts are looked up by `HMAC(username)`, so changing the secret that derives
-that hash makes every existing account unreachable. Set `username_secret`
-explicitly (initially to the same value as `secret_key`) so that `secret_key`
-itself can later be rotated — for example after a suspected leak — without
-locking anyone out.
+### Reverse proxy
 
-Existing databases never apply pending migrations implicitly. After you create and verify
-a separate backup, `migration_approval` must exactly match every pending version.
-Versions are digits only, without the hyphens used in the migration directory
-names — the startup error prints the exact value to use, so the simplest approach
-is to start the server once and copy it from the log. SQLite
-also creates a consistent `*.pre-migration-<version>` backup immediately before changing
-the schema. Remove the approval after deployment so it cannot authorize a later migration.
+Registration and login are rate limited per client address. Behind a reverse
+proxy, every request comes from the proxy, so all clients would share one
+limit. Configure the server to read the real address from `X-Forwarded-For`:
 
-`oidc` section of the configuration (all options are required to use OIDC):
-| Config option                   | Description                                                    | Default    | Example                  |
-| ----------------------          | ----------------------------------------------------------     | ---------- | ------------------------ |
-| `provider_url`                  | Base URL of the OIDC provider                                  | None       | https://auth.example.com |
-| `client_id`                     | Client ID of the OAuth app configured at the OIDC provider     | None       | SecretOauthAppClientID   |
-| `client_secret`                 | Client secret of the OAuth app configured at the OIDC provider | None       | SomeVerySecureString64   |
-| `app_url`                       | Public URL to the `sync-server` instance                       | None       | https://sync.example.com |
-| `allowed_redirect_urls`         | Client URLs that OIDC login and deletion may redirect back to  | `[]`       | ["myapp://oidc"]         |
+| Setup                                     | `trust_forwarded_for` | `trusted_proxy_hops` |
+| ----------------------------------------- | --------------------- | -------------------- |
+| Server directly reachable, no proxy       | `false`               | —                    |
+| One reverse proxy (example compose files) | `true`                | `1`                  |
+| Cloudflare Tunnel (`cloudflared`)         | `true`                | `2`                  |
+| Other proxy chains                        | `true`                | number of proxies    |
 
-The OIDC app must be configured to allow redirects to `<your_app_url>/v1/account/oidc/authenticate/callback` and
-`<your_app_url>/v1/account/oidc/delete/callback`.
+- The server counts `trusted_proxy_hops` entries from the end of the header.
+  Your own proxies appended those, so clients cannot pick their address by
+  sending the header themselves.
+- Only enable `trust_forwarded_for` when the server cannot be reached directly.
+  Otherwise clients can spoof their address.
+- A wrong hop count is worse than none. With Cloudflare Tunnel at `1`, the
+  address changes between Cloudflare edge servers. Clients can then bypass
+  the limit, and others get rate limited at random.
+- To check your setup, send more than 10 login requests within a minute from
+  one client. Responses should switch to `429` and stay there. If they alternate,
+  the hop count is wrong.
+- Access logs use the same client address. They fall back to the peer address
+  when the header is untrusted, missing, or invalid.
+- The limiter is per process and best effort. Rate limit at the proxy as well,
+  which is required with multiple replicas.
+- Every `/v1/...` path also works without the `/v1` prefix. Proxy or WAF rules
+  for `/v1/account/delete` must also cover `/account/delete`.
 
-OIDC login passes the session token to its `redirect_url`, so the server only accepts URLs listed exactly in
-`allowed_redirect_urls`. With an empty list, OIDC login and deletion are refused. Signing in with OIDC for the
-first time creates an account, which `allow_registration = false` prevents.
+### File permissions
 
-### External Services
+The image runs as uid `10001`, but a bind-mounted directory keeps its host
+ownership. SQLite deployments need a data directory that uid can write:
 
-The server contacts these external services:
+```sh
+mkdir -p ./data && sudo chown -R 10001:10001 ./data
+```
 
-- YouTube, to validate submitted channel and video metadata. Disable with `validate_submitted_metadata = false`.
-- [Have I Been Pwned](https://haveibeenpwned.com/Passwords), to reject passwords found in data breaches when
-  registering or changing a password. Only the first five hex digits of the password's SHA-1 hash are sent. If
-  the lookup fails, the password is accepted.
+- Otherwise the server fails with a database connection timeout, not a
+  permission error.
+- Upgrading from an image that ran as root needs the same command. It only
+  changes ownership, not data.
+- Without `sudo`, run the container as the directory's owner instead:
 
-## API Documentation
-- Start the app, e.g. with `cargo run`.
-- The documentation can now be found at `http://localhost:8080/docs`.
+  ```yaml
+  services:
+    sync:
+      user: "1000:1000" # from `id -u`:`id -g`
+  ```
+
+### Database migrations
+
+The server never migrates an existing database on its own. To upgrade:
+
+1. Back up the database and verify the backup.
+2. Start the new version. It refuses to start and logs the pending migration
+   versions.
+3. Set `migration_approval` to exactly those versions, comma-separated (for
+   example `MIGRATION_APPROVAL=202607211800000000`), and start it again.
+   SQLite also writes a `*.pre-migration-<version>` backup before migrating.
+4. Remove `migration_approval` so it cannot approve a later migration.
+
+### OIDC
+
+Add an `[oidc]` section to `config.toml` to let users sign in through an
+OpenID Connect provider. All options except `allowed_redirect_urls` are
+required.
+
+| Option                  | Description                                              | Example                    |
+| ----------------------- | -------------------------------------------------------- | -------------------------- |
+| `provider_url`          | Base URL of the OIDC provider                            | `https://auth.example.com` |
+| `client_id`             | Client ID of the OAuth app                               |                            |
+| `client_secret`         | Client secret of the OAuth app                           |                            |
+| `app_url`               | Public URL of this server                                | `https://sync.example.com` |
+| `allowed_redirect_urls` | Client URLs that login and deletion may redirect back to | `["myapp://oidc"]`         |
+
+- Allow these redirect URLs in the OAuth app:
+  - `<app_url>/v1/account/oidc/authenticate/callback`
+  - `<app_url>/v1/account/oidc/delete/callback`
+- OIDC login hands the session token to the client's redirect URL. The server
+  only accepts URLs listed exactly in `allowed_redirect_urls`, and refuses OIDC
+  login and deletion while the list is empty.
+- With `allow_registration = false`, users cannot sign in with OIDC for the
+  first time.
+
+### External services
+
+- **YouTube**, to validate submitted channel and video metadata. Disable with
+  `validate_submitted_metadata = false`.
+- **[Have I Been Pwned](https://haveibeenpwned.com/Passwords)**, to reject
+  breached passwords at registration and password changes. Only the first five
+  hex digits of the password's SHA-1 hash are sent. If the lookup fails, the
+  password is accepted.
+
+## API
+
+Every instance serves interactive API documentation at `/docs`. It lists the
+canonical `/v1` paths. Each one also works without the prefix, using the same
+handler, and unprefixed paths remain version 1 aliases if a later version is
+added.
 
 ### Authentication
-There are two ways to login:
-- via username and password, i.e. credentials are stored on the server
-- via OpenID Connect, i.e. authentication is delegated to an OIDC server. Only works if you configure the OIDC provider as described in [the configuration reference](configuration-reference)
 
-To delete an OIDC account, send an authenticated `POST /v1/account/oidc/delete` request and open the returned
-`authorization_url` in a browser. The account is deleted once its owner signs in with the OIDC provider there.
+Register or log in with a username and password, or through [OIDC](#oidc). The
+response contains a `jwt`. Send it as a header or cookie on authenticated
+requests:
 
-After registering or logging in, you receive a `jwt` as response.
+```http
+Authorization: <jwt>
+Cookie: Authorization=<jwt>
+```
 
-This `jwt` must be passed either as `Authorization` cookie or header for authenticated requests, e.g. for creating subscriptions.
-For example:
-- Header: `Authorization: abcdefghijklmnopqrtuvwxyz`
-- Cookie: `Authorization=abcdefghijklmnopqrtuvwxyz`
+To delete an OIDC account, send an authenticated `POST /v1/account/oidc/delete`
+and open the returned `authorization_url` in a browser. The account is deleted
+once its owner signs in there.
+
+### Capabilities
+
+`GET /health` returns the server status, its capabilities, and
+`privacy_policy_url` if configured. Clients use the capabilities to decide which
+features they can use.
+
+| Capability                                                                                                 | Meaning                                                        |
+| ---------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `encrypted_sync`                                                                                           | [Encrypted sync](#encrypted-sync) is available                 |
+| `collection_changes`                                                                                       | Collections accept [incremental changes](#incremental-changes) |
+| `live_sync`                                                                                                | [Change notifications and device requests](#live-sync)         |
+| `account_sessions`                                                                                         | Tokens are bound to [account sessions](#account-sessions)      |
+| `key_pairing`                                                                                              | [Secure device pairing](#secure-device-pairing)                |
+| `bulk_sync`                                                                                                | Plaintext subscriptions and watch history accept bulk uploads  |
+| `history_page_size`                                                                                        | Maximum page size for plaintext watch history                  |
+| `seen_videos`, `seen_posts`, `seen_rss_items`, `watch_stats`, `live_reminders`, `external_media_positions` | The matching [collection](#collections) exists                 |
+
+### Encrypted sync
+
+| Endpoint                              | Purpose                               |
+| ------------------------------------- | ------------------------------------- |
+| `GET /v1/encrypted_sync`              | Manifest of collections and revisions |
+| `GET /v1/encrypted_sync/{collection}` | Download one collection               |
+| `PUT /v1/encrypted_sync/{collection}` | Upload one collection                 |
+
+- Each collection has its own revision. Uploading with a stale revision fails
+  with `409` without blocking other collections.
+- While an account still has plaintext records, the manifest sets
+  `legacy_data`. The client then pulls and merges them before its first
+  encrypted upload.
+- Each plaintext domain is deleted in the same transaction that stores its
+  encrypted collection, so an interrupted migration can resume.
+
+#### Collections
+
+| Collection                                     | Size limit | Capability                 |
+| ---------------------------------------------- | ---------- | -------------------------- |
+| `settings`                                     | 2 MiB      |                            |
+| `profiles`, `sessions`, `sessionsV2`           | 8 MiB      |                            |
+| `watchStats` (per-device totals)               | 8 MiB      | `watch_stats`              |
+| `liveReminders`                                | 8 MiB      | `live_reminders`           |
+| `subscriptions`, `playlistBookmarks`           | 16 MiB     |                            |
+| `seenVideos`                                   | 16 MiB     | `seen_videos`              |
+| `seenPosts`                                    | 16 MiB     | `seen_posts`               |
+| `seenRssItems`                                 | 16 MiB     | `seen_rss_items`           |
+| `externalMediaPositions` (media opened by URL) | 16 MiB     | `external_media_positions` |
+| `playlists`, `history`                         | 64 MiB     |                            |
+
+All collections of an account, including pending changes, are limited to
+128 MiB in total. `seenPosts` is separate from `seenVideos` so older clients
+that sync `seenVideos` cannot erase post marks.
+
+### Incremental changes
+
+With `collection_changes`, clients can upload a small encrypted change instead
+of the whole collection. The server stores changes as opaque ciphertext, so
+their format is up to the clients.
+
+- `POST /v1/encrypted_sync/{collection}/changes` takes the same body as `PUT`
+  and appends one change at the next revision. Each change can be up to
+  256 KiB.
+- `GET /v1/encrypted_sync/{collection}?since={revision}` returns
+  `base_revision` and `changes`:
+  - If the change log covers `since`, the response omits `payload` and lists
+    only later changes.
+  - Otherwise it contains the full `payload` at `base_revision`, followed by
+    every change after it.
+- `PUT` stores a full payload and clears the change log.
+- While a collection has pending changes, reads without `since` fail with
+  `409`, because those clients cannot apply changes.
+
+An append fails with `412`, and the client uploads the full collection instead,
+when:
+
+- any session of the account that was active in the last 30 days has never
+  read with `since` or appended a change. This includes an older client
+  signing in, or using a legacy token for the first time.
+- the collection has never been fully uploaded
+- the collection already has 64 pending changes
+- the pending changes would outgrow the full payload (minimum 1 MiB)
+
+### Live sync
+
+With `live_sync`:
+
+- `GET /v1/encrypted_sync/changes?since={cursor}` returns the current cursor
+  once it differs from `since`, waiting up to 25 seconds for a change.
+- `GET /v1/encrypted_sync/events?since={id}` lists encrypted events for the
+  requesting device: activity records that clients attach to uploads, and
+  requests from other devices, such as opening a video.
+- `POST /v1/encrypted_sync/events` sends an encrypted request to another
+  device, and `DELETE /v1/encrypted_sync/events/{id}` acknowledges one.
+- Event payloads are limited to 256 KiB, and an account can have up to 100
+  pending device requests.
 
 ### Account sessions
 
-Capability `account_sessions: 1` means authentication tokens are backed by
-stored account sessions. Registration, password login, and OIDC login create an
-active session. Secure pairing creates a provisional session that becomes active
-only when the receiving device consumes the approved pairing payload. A token
-contains that session's ID in its `jti`
-claim, and authenticated requests fail after the session is revoked or expires.
-Tokens issued before this capability was added do not contain `jti`. For
-accounts present during the migration, the server accepts a still-valid legacy
-token and creates its session on first use. New accounts require session-bound
-tokens. The server
-derives stable session and device IDs from a SHA-256 digest of the token and
-does not store the token itself. Revoking that session leaves a tombstone until
-the token expires, so the same token cannot recreate the session.
+With `account_sessions`, each token belongs to a stored session, named in its
+`jti` claim. Revoked or expired sessions stop authenticating immediately.
 
-Current clients send a random 16-byte base64url device ID when they authenticate.
-The field is optional so older clients can continue to register and sign in; the
-server assigns their device ID. Clients
-encrypt the user-visible device name, operating system, system release, and
-architecture with the enhanced-privacy key, then update the session with the
-ciphertext. Clients can replace that ciphertext to rename any active device.
-The server retains creation, last-active, and expiry times. It writes
-last-active changes at most once every five minutes.
+| Endpoint                           | Purpose                                                                   |
+| ---------------------------------- | ------------------------------------------------------------------------- |
+| `GET /v1/account/sessions`         | List active sessions, and whether the account supports password login     |
+| `PATCH /v1/account/sessions/{id}`  | Store encrypted device information (`current` for the requesting session) |
+| `DELETE /v1/account/sessions/{id}` | Revoke a session                                                          |
+| `PUT /v1/account/password`         | Change the password and revoke all other sessions                         |
 
-The endpoints are:
+- **Creation.** Registration, password login, and OIDC login create an active
+  session. [Pairing](#secure-device-pairing) creates a provisional one that
+  becomes active once the new device consumes the pairing payload.
+- **Devices.** Clients send a random 16-byte base64url device ID when they
+  authenticate. Older clients that omit it get a server-assigned one.
+- **Device information.** The device name, operating system, release, and
+  architecture are encrypted with the privacy key. Any active device can
+  replace them, for example to rename another device.
+- **Timestamps.** The server keeps creation, last-active, and expiry times.
+  Last-active is written at most every five minutes. Expired and revoked
+  sessions are removed within about an hour of expiring.
+- **Password changes** verify the current password, return a new token for the
+  requesting device, and revoke every other session in one transaction. A login
+  that checked the old password concurrently is rejected too.
 
-- authenticated `GET /v1/account/sessions` to list active sessions and whether the account supports password login
-- authenticated `PATCH /v1/account/sessions/{id}` to store encrypted device information; `current` may be used as the ID for the requesting session
-- authenticated `DELETE /v1/account/sessions/{id}` to revoke one session
-- authenticated `PUT /v1/account/password` to change a password, revoke every existing session, and return a replacement JWT for the requesting device
+Tokens issued before account sessions have no `jti`:
 
-Expired and revoked sessions never authenticate. A background task removes them
-after expiry, normally within one hour. Password changes verify the current
-password and update its Argon2 hash in the same transaction that rotates the
-requesting session, advances the account's session generation, and revokes the
-rest. The generation check also rejects a concurrent login that verified the old
-password but had not created its session yet. Password changes reject every legacy token
-that has not yet created a session. This lets operators deploy the feature
-without signing out old clients, while password changes still invalidate all
-other access.
-
-### Enhanced privacy sync
-
-`GET /health` returns the server's capabilities alongside its health status.
-When configured, it also includes a top-level `privacy_policy_url` string so
-clients can link to the operator's privacy policy. The field is omitted when unset.
-Authenticated clients read the collection manifest from `GET /v1/encrypted_sync`
-and transfer individual opaque collections through `GET` and `PUT`
-`/v1/encrypted_sync/{collection}`. Each collection has an independent revision;
-an update with a stale revision fails with HTTP 409 without blocking unrelated
-collections. The server never receives the privacy passphrase or plaintext sync
-content. Before the first encrypted collection is uploaded, the manifest's
-`legacy_data` flag tells the client to pull and merge the old plaintext records.
-Each legacy domain is removed transactionally only after its matching encrypted
-collection is stored, so an interrupted migration can safely resume.
-Ciphertext uploads have collection-specific limits: 2 MiB for settings, 8 MiB
-for profiles, watch statistics, and versioned or legacy
-sessions, 16 MiB for subscriptions, playlist bookmarks, seen-video, seen-post
-or seen RSS item marks, and external media positions, and 64 MiB for playlists and history. The `seen_posts: 1`
-capability enables the separate `seenPosts` collection, so older clients
-syncing `seenVideos` cannot erase post marks. The `watch_stats: 1` capability
-enables the `watchStats` collection for per-device totals. The
-`external_media_positions: 1` capability enables the `externalMediaPositions`
-collection for playback positions of media that clients open by URL. The
-`seen_rss_items: 1` capability enables the `seenRssItems` collection for the
-RSS feed items that clients marked as seen.
-The combined active encrypted collections for one account cannot exceed 128 MiB.
-
-Capability `collection_changes: 1` lets clients upload a small encrypted change
-instead of the full collection. `POST /v1/encrypted_sync/{collection}/changes`
-takes the same body as `PUT` and appends one change at the next revision. The
-server stores changes as opaque ciphertext, so the client that wrote them is
-responsible for their format. `GET /v1/encrypted_sync/{collection}?since={revision}`
-returns `base_revision` and `changes`. When the change log covers `since`, the
-response omits `payload` and lists only later changes. Otherwise it contains the
-full payload at `base_revision`, followed by every change after it. A `PUT`
-stores a new full payload and clears the change log.
-
-Clients that read without `since` cannot apply changes. While a collection has
-pending changes, such reads fail with HTTP 409. To prevent that, an append
-returns HTTP 412 unless every active session of the account has read with
-`since` or appended a change. An older client that signs in, or uses a legacy
-token for the first time, adds a session that blocks appends; until another
-client uploads the full collection, its reads fail instead of returning stale
-data. An append also returns 412
-when the collection has never been fully uploaded, already holds 64 changes, or
-when its changes would exceed the size of the full payload (with a 1 MiB
-minimum). Clients then upload the full collection instead. Each change can be
-up to 256 KiB, and changes count toward the account storage limit.
+- Accounts that existed at the migration can keep using such a token until it
+  expires. Its session is created on first use. New accounts need
+  session-bound tokens.
+- The session and device IDs are derived from a SHA-256 digest of the token.
+  The token itself is not stored.
+- A revoked legacy session leaves a tombstone until the token expires, so the
+  token cannot recreate it.
+- Password changes reject legacy tokens that have not created a session yet.
 
 ### Secure device pairing
 
-Capability `key_pairing: 1` advertises passwordless device pairing for
-enhanced-privacy sync. A receiving device anonymously creates a pending
-session, then shows a QR or text code. An already authenticated device claims
-the session for its account and approves it. During the claim, the server creates
-a provisional account session and mints a JWT for the receiving device. The approving
-device encrypts that JWT,
-the account name, privacy key, privacy salt, and a six-digit verification code
-before uploading one opaque relay payload.
+With `key_pairing`, a signed-in device can set up a new device for encrypted
+sync without the password or passphrase:
 
-The server stores the session ID, SHA-256 recipient-token hash, recipient public
-key, device IDs, receiving-device display name, expiry, account
-ID after claim, and approved ciphertext. It never receives the QR-only secret,
-recipient private key, privacy key, or privacy passphrase. Poll, consume, and
-cancel requests send the raw recipient token in a request header; the server
-stores only its hash. The server created the fresh JWT and therefore knows that
-token. It can drop or overwrite the encrypted transfer, but it cannot decrypt
-it or forge a valid replacement without the QR-only secret.
+1. The new device creates a pairing session and shows a QR or text code.
+2. A signed-in device scans it and claims the session. The server creates a
+   provisional account session and a token for the new device.
+3. The signed-in device encrypts the token, account name, privacy key, privacy
+   salt, and a six-digit verification code, and uploads them.
+4. The new device consumes the payload. This deletes it and activates the
+   session.
 
-Sessions expire after two minutes, and a background task normally deletes them
-within another 30 seconds. The server permits at most 10,000 active pairing
-sessions globally and five claimed sessions per account. Authenticated pairing
-requests are limited to 120 per account per minute, while anonymous creation
-uses the server's address-based request limiter. Claim and approval accept an
-identical retry after success. Consumption atomically returns and deletes the
-ciphertext, activates the provisional account session, and cancellation or
-expiry deletes it.
+| Endpoint                        | Authentication  | Purpose                                                   |
+| ------------------------------- | --------------- | --------------------------------------------------------- |
+| `POST /v1/pairing`              | none            | Create a session with a recipient-token hash              |
+| `GET /v1/pairing/{id}`          | recipient token | Read its metadata and state                               |
+| `POST /v1/pairing/{id}/claim`   | account         | Bind it to the account and create the provisional session |
+| `PUT /v1/pairing/{id}`          | account         | Approve it with the encrypted payload                     |
+| `POST /v1/pairing/{id}/consume` | recipient token | Return and delete the payload                             |
+| `DELETE /v1/pairing/{id}`       | recipient token | Cancel it                                                 |
 
-The endpoints are:
+**What the server knows.** It stores the session ID, a SHA-256 hash of the
+recipient token, the recipient public key, device IDs, the new device's display
+name, the expiry, the account ID after the claim, and the encrypted payload. It
+never receives the QR-only secret, the recipient private key, the privacy key,
+or the passphrase. It knows the new token because it created it. It can drop or
+overwrite the payload, but cannot decrypt it or forge a valid one.
 
-- anonymous `POST /v1/pairing` to create a session with a recipient-token hash
-- recipient-token `GET /v1/pairing/{id}` to inspect its metadata and state
-- authenticated `POST /v1/pairing/{id}/claim` to bind it to an account, create its provisional session, and mint a JWT
-- authenticated `PUT /v1/pairing/{id}` to approve it with an opaque ciphertext
-- recipient-token `POST /v1/pairing/{id}/consume` to atomically consume it
-- recipient-token `DELETE /v1/pairing/{id}` to cancel it
+**Limits.**
 
-The protocol, threat model, fixed serialization, and interoperability vector
-live in the OpenTubeX client repository at `docs/sync-key-pairing-v1.md`.
+- Sessions expire after two minutes and are usually deleted within another
+  30 seconds. Cancelling deletes them right away.
+- At most 10,000 active sessions server-wide, and five claimed sessions per
+  account.
+- Authenticated pairing requests are limited to 120 per account per minute.
+  Creation uses the per-address rate limit.
+- Repeating a successful claim or approval with the same data succeeds again.
+
+The protocol, threat model, serialization, and test vector are documented in
+the OpenTubeX client repository at `docs/sync-key-pairing-v1.md`.
 
 ## Development
 
-### Running
+1. Copy `config.dev.toml` to `config.toml`.
+2. Set `secret_key` to the output of `openssl rand -hex 32`.
+3. Run `cargo run`.
+4. Open <http://localhost:8080/docs> for the API playground.
 
-- Copy `config.dev.toml` to `config.toml`.
-- Replace `secret_key` with the output of `openssl rand -hex 32`.
-- Execute `cargo run`.
-- Visit <http://localhost:8080/docs> to open the API playground.
+### Database changes
 
-### Adding New Database Objects or Altering Tables
-+ Create a new migration with `MIGRATION_DIRECTORY=migrations/<database_backend> diesel migration generate <migration_name>` for every database backend.
-+ Edit the `up.sql` and `down.sql` files in `migrations/<database_backend>/..._<migration_name>`. E.g., add a `SQL CREATE TABLE` statement or alter an existing table by adding a new field.
-+ Manually create Rust structs for it in `src/models.rs`.
+1. Generate a migration for each backend:
+   `MIGRATION_DIRECTORY=migrations/<backend> diesel migration generate <name>`.
+2. Edit `up.sql` and `down.sql` in `migrations/<backend>/..._<name>`.
+3. Add the matching Rust structs to `src/models.rs`.
 
-For more information, see <https://diesel.rs/guides/getting-started>.
+See the [Diesel guide](https://diesel.rs/guides/getting-started) for details.
