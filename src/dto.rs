@@ -37,6 +37,7 @@ pub struct SyncCapabilities {
     pub live_reminders: u8,
     pub external_media_positions: u8,
     pub seen_rss_items: u8,
+    pub notification_dismissals: u8,
     pub live_sync: u8,
     /// Collections accept appended changes and incremental reads.
     pub collection_changes: u8,
