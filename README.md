@@ -183,9 +183,9 @@ list. Compose doesn't pass entries in `.env` to the container on its own.
   login and deletion while the list is empty.
 - With `allow_registration = false`, users cannot sign in with OIDC for the
   first time.
-- The OpenTubeX desktop and mobile apps return to `opentubex://oidc`. They show
-  the login button when `GET /meta` reports `"oidc": true`, labeled with
-  `display_name` if set.
+- The OpenTubeX desktop and mobile apps return to `opentubex://oidc`, and its
+  iOS nightly builds to `opentubex-nightly://oidc`. They show the login button
+  when `GET /meta` reports `"oidc": true`, labeled with `display_name` if set.
 
 ### External services
 
