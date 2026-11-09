@@ -3,6 +3,7 @@ use utoipa_actix_web::scope;
 
 use crate::{
     CONFIG,
+    config::OidcConfig,
     dto::{HealthResponse, MetaResponse, MetaResponseApi, MetaResponseCapabilities},
     handlers::{HandlerResult, ScopedHandler, encrypted_sync::sync_capabilities},
 };
@@ -42,6 +43,25 @@ async fn health_state(privacy_policy_url: web::Data<Option<String>>) -> impl Res
 mod tests {
     use super::*;
 
+    #[test]
+    fn oidc_display_name_is_trimmed_and_omitted_when_blank() {
+        let config = |display_name: Option<&str>| OidcConfig {
+            provider_url: "https://auth.example.com".to_owned(),
+            client_id: "sync-server".to_owned(),
+            client_secret: "secret".to_owned(),
+            app_url: "https://sync.example.com".to_owned(),
+            allowed_redirect_urls: Vec::new(),
+            display_name: display_name.map(str::to_owned),
+        };
+        assert_eq!(oidc_display_name(None), None);
+        assert_eq!(oidc_display_name(Some(&config(None))), None);
+        assert_eq!(oidc_display_name(Some(&config(Some("  ")))), None);
+        assert_eq!(
+            oidc_display_name(Some(&config(Some(" Authelia ")))),
+            Some("Authelia".to_owned())
+        );
+    }
+
     #[actix_web::test]
     async fn health_routes_advertise_only_the_configured_privacy_policy() {
         for policy in [None, Some("https://operator.example/privacy".to_owned())] {
@@ -69,6 +89,13 @@ mod tests {
     }
 }
 
+pub(crate) fn oidc_display_name(oidc: Option<&OidcConfig>) -> Option<String> {
+    oidc.and_then(|oidc| oidc.display_name.as_deref())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+}
+
 #[utoipa::path(responses((status = OK, body = MetaResponse)))]
 #[get("/meta")]
 async fn server_metainfo() -> HandlerResult<impl Responder> {
@@ -79,6 +106,7 @@ async fn server_metainfo() -> HandlerResult<impl Responder> {
         version: env!("CARGO_PKG_VERSION").into(),
         capabilities: MetaResponseCapabilities {
             oidc: CONFIG.oidc.is_some(),
+            oidc_display_name: oidc_display_name(CONFIG.oidc.as_ref()),
         },
     }))
 }

@@ -160,7 +160,7 @@ The server never migrates an existing database on its own. To upgrade:
 
 Add an `[oidc]` section to `config.toml`, or set the matching `OIDC__*`
 environment variables, to let users sign in through an OpenID Connect provider.
-All options except `allowed_redirect_urls` are required. As an environment
+All options except `allowed_redirect_urls` and `display_name` are required. As an environment
 variable, `allowed_redirect_urls` takes a comma-separated list, e.g.
 `OIDC__ALLOWED_REDIRECT_URLS=myapp://oidc,https://app.example.com/oidc`.
 With the Compose quick start, add the variables to the service's `environment`
@@ -172,7 +172,8 @@ list. Compose doesn't pass entries in `.env` to the container on its own.
 | `client_id`             | Client ID of the OAuth app                               |                            |
 | `client_secret`         | Client secret of the OAuth app                           |                            |
 | `app_url`               | Public URL of this server                                | `https://sync.example.com` |
-| `allowed_redirect_urls` | Client URLs that login and deletion may redirect back to | `["myapp://oidc"]`         |
+| `allowed_redirect_urls` | Client URLs that login and deletion may redirect back to | `["opentubex://oidc"]`     |
+| `display_name`          | Provider name that clients show on their login button    | `Authelia`                 |
 
 - Allow these redirect URLs in the OAuth app:
   - `<app_url>/v1/account/oidc/authenticate/callback`
@@ -182,6 +183,9 @@ list. Compose doesn't pass entries in `.env` to the container on its own.
   login and deletion while the list is empty.
 - With `allow_registration = false`, users cannot sign in with OIDC for the
   first time.
+- The OpenTubeX desktop and mobile apps return to `opentubex://oidc`, and its
+  iOS nightly builds to `opentubex-nightly://oidc`. They show the login button
+  when `GET /meta` reports `"oidc": true`, labeled with `display_name` if set.
 
 ### External services
 

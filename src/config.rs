@@ -34,6 +34,9 @@ pub struct OidcConfig {
     /// token to this URL, so only list clients you trust.
     #[serde(default, deserialize_with = "string_list")]
     pub allowed_redirect_urls: Vec<String>,
+    /// Provider name that clients show on their login button, e.g. `Authelia`.
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 /// Accepts a list, or a comma-separated string so that lists can be set
@@ -335,6 +338,7 @@ mod tests {
             client_secret: String::new(),
             app_url: String::new(),
             allowed_redirect_urls: Vec::new(),
+            display_name: None,
         });
         assert_eq!(
             config.validate(),
@@ -358,6 +362,7 @@ mod tests {
             client_secret: STRONG.to_owned(),
             app_url: "https://sync.example.com".to_owned(),
             allowed_redirect_urls: Vec::new(),
+            display_name: None,
         });
         assert!(config.validate().is_ok());
     }
@@ -392,6 +397,7 @@ mod tests {
                 "OIDC__ALLOWED_REDIRECT_URLS",
                 "myapp://oidc, https://app.example.com/oidc",
             ),
+            ("OIDC__DISPLAY_NAME", "Authelia"),
         ]);
 
         assert_eq!(config.secret, STRONG);
@@ -407,6 +413,7 @@ mod tests {
             oidc.allowed_redirect_urls,
             ["myapp://oidc", "https://app.example.com/oidc"]
         );
+        assert_eq!(oidc.display_name.as_deref(), Some("Authelia"));
     }
 
     /// Variables override single options of a `config.toml` section, and the
