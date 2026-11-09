@@ -220,16 +220,16 @@ once its owner signs in there.
 `privacy_policy_url` if configured. Clients use the capabilities to decide which
 features they can use.
 
-| Capability                                                                                                 | Meaning                                                        |
-| ---------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| `encrypted_sync`                                                                                           | [Encrypted sync](#encrypted-sync) is available                 |
-| `collection_changes`                                                                                       | Collections accept [incremental changes](#incremental-changes) |
-| `live_sync`                                                                                                | [Change notifications and device requests](#live-sync)         |
-| `account_sessions`                                                                                         | Tokens are bound to [account sessions](#account-sessions)      |
-| `key_pairing`                                                                                              | [Secure device pairing](#secure-device-pairing)                |
-| `bulk_sync`                                                                                                | Plaintext subscriptions and watch history accept bulk uploads  |
-| `history_page_size`                                                                                        | Maximum page size for plaintext watch history                  |
-| `seen_videos`, `seen_posts`, `seen_rss_items`, `watch_stats`, `live_reminders`, `external_media_positions` | The matching [collection](#collections) exists                 |
+| Capability                                                                                                                            | Meaning                                                        |
+| ------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `encrypted_sync`                                                                                                                      | [Encrypted sync](#encrypted-sync) is available                 |
+| `collection_changes`                                                                                                                  | Collections accept [incremental changes](#incremental-changes) |
+| `live_sync`                                                                                                                           | [Change notifications and device requests](#live-sync)         |
+| `account_sessions`                                                                                                                    | Tokens are bound to [account sessions](#account-sessions)      |
+| `key_pairing`                                                                                                                         | [Secure device pairing](#secure-device-pairing)                |
+| `bulk_sync`                                                                                                                           | Plaintext subscriptions and watch history accept bulk uploads  |
+| `history_page_size`                                                                                                                   | Maximum page size for plaintext watch history                  |
+| `seen_videos`, `seen_posts`, `seen_rss_items`, `watch_stats`, `live_reminders`, `external_media_positions`, `notification_dismissals` | The matching [collection](#collections) exists                 |
 
 ### Encrypted sync
 
@@ -249,18 +249,19 @@ features they can use.
 
 #### Collections
 
-| Collection                                     | Size limit | Capability                 |
-| ---------------------------------------------- | ---------- | -------------------------- |
-| `settings`                                     | 2 MiB      |                            |
-| `profiles`, `sessions`, `sessionsV2`           | 8 MiB      |                            |
-| `watchStats` (per-device totals)               | 8 MiB      | `watch_stats`              |
-| `liveReminders`                                | 8 MiB      | `live_reminders`           |
-| `subscriptions`, `playlistBookmarks`           | 16 MiB     |                            |
-| `seenVideos`                                   | 16 MiB     | `seen_videos`              |
-| `seenPosts`                                    | 16 MiB     | `seen_posts`               |
-| `seenRssItems`                                 | 16 MiB     | `seen_rss_items`           |
-| `externalMediaPositions` (media opened by URL) | 16 MiB     | `external_media_positions` |
-| `playlists`, `history`                         | 64 MiB     |                            |
+| Collection                                                | Size limit | Capability                 |
+| --------------------------------------------------------- | ---------- | -------------------------- |
+| `settings`                                                | 2 MiB      |                            |
+| `notificationDismissals` (read and removed notifications) | 2 MiB      | `notification_dismissals`  |
+| `profiles`, `sessions`, `sessionsV2`                      | 8 MiB      |                            |
+| `watchStats` (per-device totals)                          | 8 MiB      | `watch_stats`              |
+| `liveReminders`                                           | 8 MiB      | `live_reminders`           |
+| `subscriptions`, `playlistBookmarks`                      | 16 MiB     |                            |
+| `seenVideos`                                              | 16 MiB     | `seen_videos`              |
+| `seenPosts`                                               | 16 MiB     | `seen_posts`               |
+| `seenRssItems`                                            | 16 MiB     | `seen_rss_items`           |
+| `externalMediaPositions` (media opened by URL)            | 16 MiB     | `external_media_positions` |
+| `playlists`, `history`                                    | 64 MiB     |                            |
 
 All collections of an account, including pending changes, are limited to
 128 MiB in total. `seenPosts` is separate from `seenVideos` so older clients

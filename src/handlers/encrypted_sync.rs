@@ -86,6 +86,7 @@ pub(crate) fn sync_capabilities() -> SyncCapabilities {
         live_reminders: 1,
         external_media_positions: 1,
         seen_rss_items: 1,
+        notification_dismissals: 1,
         live_sync: 1,
         collection_changes: 1,
     }
@@ -94,6 +95,8 @@ pub(crate) fn sync_capabilities() -> SyncCapabilities {
 fn collection_limit(collection: &str) -> HandlerResult<usize> {
     match collection {
         "settings" => Ok(2 * MEBIBYTE),
+        // Keys of the notifications read or removed on any device, capped by clients.
+        "notificationDismissals" => Ok(2 * MEBIBYTE),
         // `playbackSpeeds` remains readable for migration into `settings`.
         "sessions" | "sessionsV2" | "profiles" | "playbackSpeeds" => Ok(8 * MEBIBYTE),
         // Per-device watch time totals are merged by clients.
@@ -578,6 +581,11 @@ mod tests {
         assert_eq!(super::sync_capabilities().external_media_positions, 1);
         assert_eq!(collection_limit("seenRssItems").unwrap(), 16 * MEBIBYTE);
         assert_eq!(super::sync_capabilities().seen_rss_items, 1);
+        assert_eq!(
+            collection_limit("notificationDismissals").unwrap(),
+            2 * MEBIBYTE
+        );
+        assert_eq!(super::sync_capabilities().notification_dismissals, 1);
         assert_eq!(super::sync_capabilities().live_reminders, 1);
         assert_eq!(super::sync_capabilities().watch_stats, 1);
         assert_eq!(super::sync_capabilities().seen_videos, 1);
