@@ -89,7 +89,7 @@ mod tests {
     }
 }
 
-fn oidc_display_name(oidc: Option<&OidcConfig>) -> Option<String> {
+pub(crate) fn oidc_display_name(oidc: Option<&OidcConfig>) -> Option<String> {
     oidc.and_then(|oidc| oidc.display_name.as_deref())
         .map(str::trim)
         .filter(|name| !name.is_empty())

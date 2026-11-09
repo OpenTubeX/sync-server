@@ -748,14 +748,15 @@ async fn metadata_is_public_and_reports_version_and_oidc_configuration() {
     let response = test::call_service(&app, request).await;
     assert_eq!(response.status(), StatusCode::OK);
     let body: Value = test::read_body_json(response).await;
-    assert_eq!(
-        body,
-        json!({
-            "api": { "libretube-sync": env!("CARGO_PKG_VERSION") },
-            "version": env!("CARGO_PKG_VERSION"),
-            "oidc": CONFIG.oidc.is_some(),
-        })
-    );
+    let mut expected = json!({
+        "api": { "libretube-sync": env!("CARGO_PKG_VERSION") },
+        "version": env!("CARGO_PKG_VERSION"),
+        "oidc": CONFIG.oidc.is_some(),
+    });
+    if let Some(name) = crate::handlers::health::oidc_display_name(CONFIG.oidc.as_ref()) {
+        expected["oidc_display_name"] = json!(name);
+    }
+    assert_eq!(body, expected);
 }
 
 #[actix_web::test]
