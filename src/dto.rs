@@ -346,4 +346,7 @@ pub struct MetaResponseApi {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct MetaResponseCapabilities {
     pub oidc: bool,
+    /// The configured `oidc.display_name`, for clients to label their login button.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oidc_display_name: Option<String>,
 }

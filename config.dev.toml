@@ -20,4 +20,7 @@ client_id = "opentubex-dev"
 client_secret = "opentubex-dev"
 app_url = "http://localhost:8080"
 # Client URLs that OIDC login and deletion may redirect back to.
-# allowed_redirect_urls = ["myapp://oidc"]
+# OpenTubeX desktop and mobile apps return to opentubex://oidc.
+# allowed_redirect_urls = ["opentubex://oidc"]
+# Provider name that clients show on their login button.
+# display_name = "Authelia"
