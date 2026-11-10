@@ -66,7 +66,7 @@ async fn get_subscriptions(account: Account, pool: WebData) -> HandlerResult<imp
 
     let subscriptions = get_subscriptions_by_account_id(&mut conn, &account.id)
         .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?;
+        .map_err(HandlerError::database)?;
 
     Ok(HttpResponse::Ok().json(subscriptions))
 }
@@ -89,7 +89,7 @@ async fn subscribe_bulk(
         check_already_over_quota(
             count_subscriptions(&mut conn, &account.id)
                 .await
-                .map_err(|_| HandlerError::InternalDatabaseError)?,
+                .map_err(HandlerError::database)?,
         )?;
         channels_requiring_validation(&mut conn, &channels).await
     };
@@ -101,7 +101,7 @@ async fn subscribe_bulk(
     conn.transaction::<_, HandlerError, _>(async |conn| {
         lock_account_quota(conn, &account.id)
             .await
-            .map_err(|_| HandlerError::InternalDatabaseError)?;
+            .map_err(HandlerError::database)?;
         for channel in &channels {
             add_subscription_by_account_id(conn, channel, &account.id).await?;
         }
@@ -112,7 +112,7 @@ async fn subscribe_bulk(
         check_stored_rows(
             count_subscriptions(conn, &account.id)
                 .await
-                .map_err(|_| HandlerError::InternalDatabaseError)?,
+                .map_err(HandlerError::database)?,
         )?;
         Ok(())
     })
@@ -135,9 +135,7 @@ async fn get_subscription(
             Some(channel) => Ok(HttpResponse::Ok().json(channel)),
             None => Err(HandlerError::NotSubscribed),
         },
-        Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
-            err.to_string(),
-        )),
+        Err(err) => Err(HandlerError::from(err)),
     }
 }
 
@@ -157,7 +155,7 @@ async fn subscribe(
         check_already_over_quota(
             count_subscriptions(&mut conn, &account.id)
                 .await
-                .map_err(|_| HandlerError::InternalDatabaseError)?,
+                .map_err(HandlerError::database)?,
         )?;
         !channels_requiring_validation(&mut conn, std::slice::from_ref(&channel))
             .await
@@ -175,12 +173,12 @@ async fn subscribe(
         let (channel, account_id) = (&channel, &account.id);
         lock_account_quota(conn, account_id)
             .await
-            .map_err(|_| HandlerError::InternalDatabaseError)?;
+            .map_err(HandlerError::database)?;
         add_subscription_by_account_id(conn, channel, account_id).await?;
         check_stored_rows(
             count_subscriptions(conn, account_id)
                 .await
-                .map_err(|_| HandlerError::InternalDatabaseError)?,
+                .map_err(HandlerError::database)?,
         )?;
         Ok(())
     })
@@ -200,13 +198,13 @@ async fn unsubscribe(
 
     remove_subscription_by_account_id(&mut conn, &channel_id, &account.id)
         .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?;
+        .map_err(HandlerError::database)?;
 
     // now that the user no longer subscribed to the channel, the channel may also no
     // longer be part of any subscription groups, so we auto-wipe it from all groups
     remove_channel_from_all_subscription_groups(&mut conn, &channel_id, &account.id)
         .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?;
+        .map_err(HandlerError::database)?;
 
     Ok(HttpResponse::Ok())
 }
@@ -229,9 +227,7 @@ async fn get_subscription_groups(account: Account, pool: WebData) -> HandlerResu
 
             Ok(HttpResponse::Ok().json(groups))
         }
-        Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
-            err.to_string(),
-        )),
+        Err(err) => Err(HandlerError::from(err)),
     }
 }
 
@@ -246,14 +242,14 @@ async fn get_subscription_group(
 
     let Some(group) = get_subscription_group_by_id(&mut conn, &subscription_group_id, &account.id)
         .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?
+        .map_err(HandlerError::database)?
     else {
         return Err(HandlerError::SubscriptionGroupNotFound);
     };
 
     let channels = get_subscription_group_channels_by_id(&mut conn, &subscription_group_id)
         .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?;
+        .map_err(HandlerError::database)?;
 
     let extended_subscription_group = ExtendedSubscriptionGroup { group, channels };
     Ok(HttpResponse::Ok().json(extended_subscription_group))
@@ -274,9 +270,7 @@ async fn create_subscription_group(
 
     match create_new_subscription_group(&mut conn, subscription_group).await {
         Ok(group) => Ok(HttpResponse::Ok().json(group)),
-        Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
-            err.to_string(),
-        )),
+        Err(err) => Err(HandlerError::from(err)),
     }
 }
 
@@ -297,9 +291,7 @@ async fn update_subscription_group(
     match update_existing_subscription_group(&mut conn, subscription_group).await {
         Ok(group) => Ok(HttpResponse::Ok().json(group)),
         Err(diesel::result::Error::NotFound) => Err(HandlerError::SubscriptionGroupNotFound),
-        Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
-            err.to_string(),
-        )),
+        Err(err) => Err(HandlerError::from(err)),
     }
 }
 
@@ -314,9 +306,7 @@ async fn delete_subscription_group(
 
     match delete_subscription_group_by_id(&mut conn, &subscription_group_id, &account.id).await {
         Ok(_) => Ok(HttpResponse::Ok()),
-        Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
-            err.to_string(),
-        )),
+        Err(err) => Err(HandlerError::from(err)),
     }
 }
 
@@ -327,7 +317,7 @@ async fn verify_is_subscription_group_owner(
 ) -> HandlerResult<()> {
     if get_subscription_group_by_id(conn, subscription_group_id, account_id)
         .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?
+        .map_err(HandlerError::database)?
         .is_none()
     {
         return Err(HandlerError::SubscriptionGroupNotFound);
@@ -350,7 +340,7 @@ async fn add_to_subscription_group(
 
     let subscription = get_subscription_channel_by_account_id(&mut conn, &account.id, &channel_id)
         .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?;
+        .map_err(HandlerError::database)?;
     if subscription.is_none() {
         return Err(HandlerError::SubscribeBeforeChannelGroup);
     }
@@ -360,7 +350,7 @@ async fn add_to_subscription_group(
 
     add_channel_to_subscription_group(&mut conn, &subscription_group_id, &channel_id)
         .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?;
+        .map_err(HandlerError::database)?;
 
     Ok(HttpResponse::Ok())
 }
@@ -381,8 +371,6 @@ async fn remove_from_subscription_group(
         .await
     {
         Ok(_) => Ok(HttpResponse::Ok()),
-        Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
-            err.to_string(),
-        )),
+        Err(err) => Err(HandlerError::from(err)),
     }
 }

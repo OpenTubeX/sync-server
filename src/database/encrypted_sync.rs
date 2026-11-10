@@ -35,6 +35,66 @@ fn base_or_revision(base: i64, revision: i64) -> i64 {
     if base == 0 { revision } else { base }
 }
 
+/// The revision of an `encrypted_sync` row's collection. Appends leave the
+/// row alone, because SQLite reads, and often rewrites, a row's whole payload
+/// to update any of its columns, so its own revision is that of its payload.
+/// Select it with the row, so PostgreSQL reads both at the same snapshot.
+macro_rules! latest_revision {
+    () => {
+        "COALESCE((SELECT MAX(change.revision) FROM encrypted_sync_change change \
+         WHERE change.account_id = encrypted_sync.account_id AND change.collection = encrypted_sync.collection \
+         AND change.revision > encrypted_sync.revision), encrypted_sync.revision)"
+    };
+}
+
+#[derive(QueryableByName)]
+struct CollectionRevision {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    name: String,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    revision: i64,
+}
+
+#[derive(QueryableByName)]
+struct CollectionHead {
+    /// The revision of the stored payload.
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    stored_revision: i64,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    base: i64,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    revision: i64,
+}
+
+#[derive(QueryableByName)]
+struct FullCollection {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    stored_revision: i64,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    base: i64,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    revision: i64,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    payload: String,
+}
+
+async fn get_head(
+    conn: &mut DbConnection,
+    owner_id: &str,
+    collection_name: &str,
+) -> Result<Option<CollectionHead>, DbError> {
+    diesel::sql_query(concat!(
+        "SELECT revision AS stored_revision, base_revision AS base, ",
+        latest_revision!(),
+        " AS revision FROM encrypted_sync WHERE account_id = $1 AND collection = $2",
+    ))
+    .bind::<diesel::sql_types::Text, _>(owner_id)
+    .bind::<diesel::sql_types::Text, _>(collection_name)
+    .get_result(conn)
+    .await
+    .optional()
+}
+
 /// A collection read for a client that may already hold an older revision.
 #[derive(Debug, PartialEq, Eq)]
 pub struct CollectionRead {
@@ -78,14 +138,17 @@ async fn get_stored_collection(
     owner_id: &str,
     collection_name: &str,
 ) -> Result<Option<StoredCollection>, DbError> {
-    diesel::sql_query(
-        "SELECT revision, CAST(OCTET_LENGTH(payload) AS BIGINT) AS bytes, \
+    diesel::sql_query(concat!(
+        "SELECT ",
+        latest_revision!(),
+        " AS revision, \
+         CAST(OCTET_LENGTH(payload) AS BIGINT) AS bytes, \
          CAST((SELECT COALESCE(SUM(OCTET_LENGTH(change.payload)), 0) FROM encrypted_sync_change change \
            WHERE change.account_id = encrypted_sync.account_id AND change.collection = encrypted_sync.collection) AS BIGINT) AS change_bytes, \
          CAST((SELECT COUNT(*) FROM encrypted_sync_change change \
            WHERE change.account_id = encrypted_sync.account_id AND change.collection = encrypted_sync.collection) AS BIGINT) AS changes \
          FROM encrypted_sync WHERE account_id = ? AND collection = ?",
-    )
+    ))
     .bind::<diesel::sql_types::Text, _>(owner_id)
     .bind::<diesel::sql_types::Text, _>(collection_name)
     .get_result(conn)
@@ -99,14 +162,17 @@ async fn get_stored_collection(
     owner_id: &str,
     collection_name: &str,
 ) -> Result<Option<StoredCollection>, DbError> {
-    diesel::sql_query(
-        "SELECT revision, OCTET_LENGTH(payload)::BIGINT AS bytes, \
+    diesel::sql_query(concat!(
+        "SELECT ",
+        latest_revision!(),
+        " AS revision, \
+         OCTET_LENGTH(payload)::BIGINT AS bytes, \
          (SELECT COALESCE(SUM(OCTET_LENGTH(change.payload)), 0) FROM encrypted_sync_change change \
            WHERE change.account_id = encrypted_sync.account_id AND change.collection = encrypted_sync.collection)::BIGINT AS change_bytes, \
          (SELECT COUNT(*) FROM encrypted_sync_change change \
            WHERE change.account_id = encrypted_sync.account_id AND change.collection = encrypted_sync.collection)::BIGINT AS changes \
          FROM encrypted_sync WHERE account_id = $1 AND collection = $2",
-    )
+    ))
     .bind::<diesel::sql_types::Text, _>(owner_id)
     .bind::<diesel::sql_types::Text, _>(collection_name)
     .get_result(conn)
@@ -196,12 +262,17 @@ pub async fn revisions(
     conn: &mut DbConnection,
     owner: &str,
 ) -> Result<Vec<(String, i64)>, DbError> {
-    encrypted_sync
-        .filter(account_id.eq(owner))
-        .order(collection.asc())
-        .select((collection, encrypted_revision))
-        .load(conn)
-        .await
+    Ok(diesel::sql_query(concat!(
+        "SELECT collection AS name, ",
+        latest_revision!(),
+        " AS revision FROM encrypted_sync WHERE account_id = $1 ORDER BY collection",
+    ))
+    .bind::<diesel::sql_types::Text, _>(owner)
+    .load::<CollectionRevision>(conn)
+    .await?
+    .into_iter()
+    .map(|row| (row.name, row.revision))
+    .collect())
 }
 
 pub async fn save(
@@ -302,16 +373,15 @@ pub async fn read_since(
     for _ in 0..3 {
         let read = conn
             .transaction(async |conn| {
-                let Some((revision, base)) = encrypted_sync
-                    .filter(account_id.eq(owner_id).and(collection.eq(collection_name)))
-                    .select((encrypted_revision, base_revision))
-                    .first::<(i64, i64)>(conn)
-                    .await
-                    .optional()?
+                let Some(CollectionHead {
+                    stored_revision,
+                    base,
+                    revision,
+                }) = get_head(conn, owner_id, collection_name).await?
                 else {
                     return Ok(Some(None));
                 };
-                let base = base_or_revision(base, revision);
+                let base = base_or_revision(base, stored_revision);
                 let incremental = since >= base && since <= revision;
                 let payload = if incremental {
                     None
@@ -319,7 +389,7 @@ pub async fn read_since(
                     Some(
                         encrypted_sync
                             .filter(account_id.eq(owner_id).and(collection.eq(collection_name)))
-                            .filter(encrypted_revision.eq(revision))
+                            .filter(encrypted_revision.eq(stored_revision))
                             .select(encrypted_payload)
                             .first::<String>(conn)
                             .await
@@ -362,19 +432,29 @@ pub async fn read_since(
 }
 
 /// The revision, base revision and full payload, read together so a concurrent
-/// append cannot pair an older payload with a newer revision.
+/// upload cannot pair an older payload with a newer revision.
 pub async fn get_full(
     conn: &mut DbConnection,
     owner_id: &str,
     collection_name: &str,
 ) -> Result<Option<(i64, i64, String)>, DbError> {
-    Ok(encrypted_sync
-        .filter(account_id.eq(owner_id).and(collection.eq(collection_name)))
-        .select((encrypted_revision, base_revision, encrypted_payload))
-        .first::<(i64, i64, String)>(conn)
-        .await
-        .optional()?
-        .map(|(revision, base, payload)| (revision, base_or_revision(base, revision), payload)))
+    Ok(diesel::sql_query(concat!(
+        "SELECT revision AS stored_revision, base_revision AS base, payload, ",
+        latest_revision!(),
+        " AS revision FROM encrypted_sync WHERE account_id = $1 AND collection = $2",
+    ))
+    .bind::<diesel::sql_types::Text, _>(owner_id)
+    .bind::<diesel::sql_types::Text, _>(collection_name)
+    .get_result::<FullCollection>(conn)
+    .await
+    .optional()?
+    .map(|row| {
+        (
+            row.revision,
+            base_or_revision(row.base, row.stored_revision),
+            row.payload,
+        )
+    }))
 }
 
 /// Record that a session reads appended changes. Appends stay disabled while
@@ -453,12 +533,9 @@ pub async fn append_change(
     // without the account lock, which takes the SQLite write lock. Stale
     // revisions still get their conflict below, and the checks repeat under
     // the lock.
-    let revision: Option<i64> = encrypted_sync
-        .filter(account_id.eq(owner_id).and(collection.eq(collection_name)))
-        .select(encrypted_revision)
-        .first(conn)
-        .await
-        .optional()?;
+    let revision = get_head(conn, owner_id, collection_name)
+        .await?
+        .map(|head| head.revision);
     if revision == Some(expected_revision)
         && !all_sessions_read_changes(conn, owner_id, now).await?
     {
@@ -503,17 +580,8 @@ pub async fn append_change(
             ))
             .execute(conn)
             .await?;
-        let filter = encrypted_sync
-            .filter(account_id.eq(owner_id))
-            .filter(collection.eq(collection_name));
-        let base: i64 = filter.select(base_revision).first(conn).await?;
-        diesel::update(filter)
-            .set((
-                encrypted_revision.eq(expected_revision + 1),
-                base_revision.eq(base_or_revision(base, expected_revision)),
-            ))
-            .execute(conn)
-            .await?;
+        // The collection row keeps the revision and base of its payload; see
+        // `latest_revision`.
 
         if let Some((payload, now)) = activity {
             crate::database::sync_event::append(conn, owner_id, "", payload, now).await?;
@@ -857,6 +925,107 @@ mod tests {
             append(&mut conn, 2, now).await,
             super::SaveResult::FullUploadRequired
         );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[actix_rt::test]
+    async fn appends_do_not_rewrite_the_stored_collection() {
+        use diesel_async::SimpleAsyncConnection;
+
+        use crate::models::EncryptedSync;
+
+        let (database, mut conn) = crate::database::TestFileDatabase::new().await;
+        conn.batch_execute(
+            "INSERT INTO account (id, name_hash, password_hash, oidc_sub) \
+             VALUES ('account-a', 'hash-a', NULL, NULL);",
+        )
+        .await
+        .unwrap();
+        let payload = "x".repeat(1024 * 1024);
+        super::create(
+            &mut conn,
+            &EncryptedSync {
+                account_id: "account-a".to_owned(),
+                collection: "history".to_owned(),
+                revision: 1,
+                payload: payload.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        conn.batch_execute("PRAGMA wal_checkpoint(TRUNCATE);")
+            .await
+            .unwrap();
+
+        // SQLite stores revision 1 in zero bytes, so writing revision 2 into
+        // the collection row would rewrite its whole payload.
+        let result = super::append_change(
+            &mut conn,
+            "account-a",
+            "history",
+            1,
+            "change",
+            usize::MAX,
+            None,
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, super::SaveResult::Saved);
+        let written = std::fs::metadata(format!("{}-wal", database.url))
+            .unwrap()
+            .len();
+        assert!(
+            written < 64 * 1024,
+            "appending a change wrote {written} bytes"
+        );
+
+        assert_eq!(
+            super::revisions(&mut conn, "account-a").await.unwrap(),
+            [("history".to_owned(), 2)]
+        );
+        let change = vec![(2, "change".to_owned())];
+        assert_eq!(
+            super::read_since(&mut conn, "account-a", "history", 1)
+                .await
+                .unwrap(),
+            Some(super::CollectionRead {
+                revision: 2,
+                base_revision: 1,
+                payload: None,
+                changes: change.clone(),
+            })
+        );
+        assert_eq!(
+            super::read_since(&mut conn, "account-a", "history", 0)
+                .await
+                .unwrap(),
+            Some(super::CollectionRead {
+                revision: 2,
+                base_revision: 1,
+                payload: Some(payload.clone()),
+                changes: change,
+            })
+        );
+        assert_eq!(
+            super::get_full(&mut conn, "account-a", "history")
+                .await
+                .unwrap(),
+            Some((2, 1, payload))
+        );
+        let stale = super::append_change(
+            &mut conn,
+            "account-a",
+            "history",
+            1,
+            "late",
+            usize::MAX,
+            None,
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(stale, super::SaveResult::Conflict);
     }
 
     #[test]

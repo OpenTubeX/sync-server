@@ -239,7 +239,7 @@ async fn create_pairing_session(
     let mut conn = get_db_conn!(pool);
     match pairing::create(&mut conn, &session, now)
         .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?
+        .map_err(HandlerError::database)?
     {
         pairing::CreateResult::Created => Ok(HttpResponse::Created().json(response(session))),
         pairing::CreateResult::Duplicate => Err(HandlerError::PairingConflict),
@@ -259,7 +259,7 @@ async fn get_pairing_session(
     let mut conn = get_db_conn!(pool);
     let session = pairing::get(&mut conn, &id, &token_hash, now_ms()?)
         .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?
+        .map_err(HandlerError::database)?
         .ok_or(HandlerError::PairingNotFound)?;
     Ok(web::Json(response(session)))
 }
@@ -303,7 +303,7 @@ async fn claim_pairing_session(
         now_ms()?,
     )
     .await
-    .map_err(|_| HandlerError::InternalDatabaseError)?
+    .map_err(HandlerError::database)?
     {
         pairing::ClaimResult::Claimed {
             pairing,
@@ -341,7 +341,7 @@ async fn approve_pairing_session(
         now_ms()?,
     )
     .await
-    .map_err(|_| HandlerError::InternalDatabaseError)?;
+    .map_err(HandlerError::database)?;
     if !approved {
         return Err(HandlerError::PairingConflict);
     }
@@ -360,7 +360,7 @@ async fn consume_pairing_session(
     let mut conn = get_db_conn!(pool);
     let session = pairing::consume(&mut conn, &id, &token_hash, now_ms()?)
         .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?
+        .map_err(HandlerError::database)?
         .ok_or(HandlerError::PairingNotFound)?;
     Ok(web::Json(PairingPayloadResponse {
         approving_device_id: session
@@ -384,7 +384,7 @@ async fn cancel_pairing_session(
     let mut conn = get_db_conn!(pool);
     if !pairing::cancel(&mut conn, &id, &token_hash)
         .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?
+        .map_err(HandlerError::database)?
     {
         return Err(HandlerError::PairingNotFound);
     }

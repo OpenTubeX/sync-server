@@ -59,7 +59,7 @@ async fn get_playlist(
     let Some((playlist, videos)) =
         get_playlist_by_id_with_videos(&mut conn, &playlist_id, &account.id)
             .await
-            .map_err(|_| HandlerError::InternalDatabaseError)?
+            .map_err(HandlerError::database)?
     else {
         return Err(HandlerError::PlaylistNotExists);
     };
@@ -85,7 +85,7 @@ async fn get_playlists(account: Account, pool: WebData) -> HandlerResult<impl Re
 
     let playlists = get_playlists_by_account_id(&mut conn, &account.id)
         .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?;
+        .map_err(HandlerError::database)?;
 
     let mut extended_playlists: Vec<ExtendedPlaylist> = vec![];
     for playlist in &playlists {
@@ -129,9 +129,7 @@ async fn create_playlist(
             let extended_playlist = ExtendedPlaylist::from_playlist(&playlist, 0);
             Ok(HttpResponse::Created().json(extended_playlist))
         }
-        Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
-            err.to_string(),
-        )),
+        Err(err) => Err(HandlerError::from(err)),
     }
 }
 
@@ -143,7 +141,7 @@ async fn get_owned_playlist_or_error(
 ) -> HandlerResult<Playlist> {
     get_playlist_by_id(conn, playlist_id, account_id)
         .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?
+        .map_err(HandlerError::database)?
         .ok_or(HandlerError::PlaylistNotExists)
 }
 
@@ -175,9 +173,7 @@ async fn update_playlist(
             let extended_playlist = ExtendedPlaylist::from_playlist(&playlist, video_count as u64);
             Ok(HttpResponse::Ok().json(extended_playlist))
         }
-        Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
-            err.to_string(),
-        )),
+        Err(err) => Err(HandlerError::from(err)),
     }
 }
 
@@ -194,9 +190,7 @@ async fn delete_playlist(
 
     match delete_playlist_by_id(&mut conn, &playlist_id, &account.id).await {
         Ok(()) => Ok(HttpResponse::Ok().json(())),
-        Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
-            err.to_string(),
-        )),
+        Err(err) => Err(HandlerError::from(err)),
     }
 }
 
@@ -229,7 +223,7 @@ async fn add_to_playlist(
         check_already_over_quota(
             count_playlist_videos(&mut conn, &account.id)
                 .await
-                .map_err(|_| HandlerError::InternalDatabaseError)?,
+                .map_err(HandlerError::database)?,
         )?;
         for (_, videos) in &groups {
             needs_validation.push(videos_requiring_validation(&mut conn, videos).await);
@@ -247,7 +241,7 @@ async fn add_to_playlist(
             (&groups, &verified, &*playlist_id, &account.id);
         lock_account_quota(conn, account_id)
             .await
-            .map_err(|_| HandlerError::InternalDatabaseError)?;
+            .map_err(HandlerError::database)?;
         // Re-check ownership: the earlier check happened before the RSS
         // round-trips, which can take seconds, so the playlist may have been
         // deleted since. Without this the inserts fail as an opaque database
@@ -258,12 +252,12 @@ async fn add_to_playlist(
             // store channel information first before storing video to ensure data integrity
             create_or_update_channel(conn, channel)
                 .await
-                .map_err(|_| HandlerError::InternalDatabaseError)?;
+                .map_err(HandlerError::database)?;
 
             for (video, verified) in videos.iter().zip(verified) {
                 add_video_to_playlist(conn, playlist_id, account_id, &video.into(), *verified)
                     .await
-                    .map_err(|_| HandlerError::InternalDatabaseError)?;
+                    .map_err(HandlerError::database)?;
             }
         }
 
@@ -273,7 +267,7 @@ async fn add_to_playlist(
         check_stored_rows(
             count_playlist_videos(conn, account_id)
                 .await
-                .map_err(|_| HandlerError::InternalDatabaseError)?,
+                .map_err(HandlerError::database)?,
         )?;
         Ok(())
     })
@@ -297,8 +291,6 @@ async fn remove_from_playlist(
 
     match remove_video_from_playlist(&mut conn, &playlist_id, &account.id, &video_id).await {
         Ok(()) => Ok(HttpResponse::Ok()),
-        Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
-            err.to_string(),
-        )),
+        Err(err) => Err(HandlerError::from(err)),
     }
 }

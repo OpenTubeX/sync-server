@@ -200,7 +200,7 @@ async fn resolve_account_session(
             now,
         )
         .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?
+        .map_err(HandlerError::database)?
         .ok_or(HandlerError::InvalidToken);
     }
 
@@ -213,7 +213,7 @@ async fn resolve_account_session(
         .await
         .map_err(|error| match error {
             diesel::result::Error::NotFound => HandlerError::InvalidToken,
-            _ => HandlerError::InternalDatabaseError,
+            error => HandlerError::database(error),
         })
 }
 
@@ -349,7 +349,7 @@ async fn register_account(
             diesel::result::Error::DatabaseError(DatabaseErrorKind::UniqueViolation, _) => {
                 HandlerError::AccountNameTaken
             }
-            _ => HandlerError::InternalDatabaseErrorWithContext(err.to_string()),
+            _ => HandlerError::from(err),
         })?;
 
     let jwt = match issue_account_session(&mut conn, &account, device_id).await {
@@ -415,9 +415,7 @@ async fn delete_account(
 
     match delete_existing_account(&mut conn, &account.id).await {
         Ok(_) => Ok(HttpResponse::Ok()),
-        Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
-            err.to_string(),
-        )),
+        Err(err) => Err(HandlerError::from(err)),
     }
 }
 
@@ -667,7 +665,7 @@ pub(crate) async fn authenticate_session(
     let now = now_ms()?;
     let account = find_account_by_id(&mut conn, &claims.sub)
         .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?
+        .map_err(HandlerError::database)?
         .ok_or(HandlerError::AccountNotExists)?;
     let mut session = resolve_account_session(&mut conn, &account, &jwt, &claims, now).await?;
     if account_session::touch(
@@ -678,7 +676,7 @@ pub(crate) async fn authenticate_session(
         now,
     )
     .await
-    .map_err(|_| HandlerError::InternalDatabaseError)?
+    .map_err(HandlerError::database)?
     {
         session.last_active_at = now;
     }
@@ -720,11 +718,11 @@ async fn authorize_request(req: &ServiceRequest) -> Result<(), actix_web::Error>
     if !exempt {
         let encrypted_sync_enabled = encrypted_sync::exists(&mut conn, &account.id)
             .await
-            .map_err(|_| HandlerError::InternalDatabaseError)?;
+            .map_err(HandlerError::database)?;
         if encrypted_sync_enabled {
             let migration_complete = !encrypted_sync::has_legacy_data(&mut conn, &account.id)
                 .await
-                .map_err(|_| HandlerError::InternalDatabaseError)?;
+                .map_err(HandlerError::database)?;
             if migration_complete {
                 return Err(HandlerError::EncryptedSyncRequired.into());
             }
@@ -1456,7 +1454,7 @@ async fn authenticate_oidc_account_callback(
         };
         insert_new_account(&mut conn, &account)
             .await
-            .map_err(|err| HandlerError::InternalDatabaseErrorWithContext(err.to_string()))?;
+            .map_err(HandlerError::from)?;
 
         account
     };
@@ -1544,7 +1542,7 @@ async fn delete_oidc_account_callback(
 
     let account = find_account_by_id(&mut conn, &account_id)
         .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?
+        .map_err(HandlerError::database)?
         .ok_or(HandlerError::AccountNotExists)?;
     // the provider must confirm the owner of the account that asked for deletion
     if account.oidc_sub.as_deref() != Some(oidc_sub.as_str()) {
@@ -1554,8 +1552,6 @@ async fn delete_oidc_account_callback(
     match delete_existing_account(&mut conn, &account.id).await {
         Ok(true) => Ok(Redirect::to(redirect_url)),
         Ok(false) => Err(HandlerError::AccountNotExists),
-        Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
-            err.to_string(),
-        )),
+        Err(err) => Err(HandlerError::from(err)),
     }
 }
