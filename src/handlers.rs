@@ -55,6 +55,8 @@ pub enum HandlerError {
     NotInWatchHistory,
     #[error("internal database error")]
     InternalDatabaseError,
+    #[error("the database is busy; try again shortly")]
+    DatabaseBusy,
     #[error("internal database error: {0}")]
     InternalDatabaseErrorWithContext(String),
     #[error("provided metadata seems to be wrong")]
@@ -118,6 +120,7 @@ impl ResponseError for HandlerError {
             Self::InvalidToken => StatusCode::UNAUTHORIZED,
             Self::NotInWatchHistory => StatusCode::NOT_FOUND,
             Self::InternalDatabaseError => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::DatabaseBusy => StatusCode::SERVICE_UNAVAILABLE,
             Self::InternalDatabaseErrorWithContext(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ValidationError => StatusCode::BAD_REQUEST,
             Self::ValidationErrorWithContext(_) => StatusCode::BAD_REQUEST,
@@ -139,6 +142,46 @@ impl ResponseError for HandlerError {
             Self::PasswordLoginDisabledForAccount => StatusCode::BAD_REQUEST,
             Self::OidcLoginDisabledForAccount => StatusCode::BAD_REQUEST,
         }
+    }
+
+    fn error_response(&self) -> actix_web::HttpResponse {
+        let mut response = actix_web::HttpResponse::build(self.status_code());
+        if matches!(self, Self::DatabaseBusy) {
+            response.insert_header((actix_web::http::header::RETRY_AFTER, "30"));
+        }
+        response
+            .insert_header(actix_web::http::header::ContentType::plaintext())
+            .body(self.to_string())
+    }
+}
+
+impl HandlerError {
+    /// Log a database error that clients only see as busy or internal.
+    pub fn database(error: diesel::result::Error) -> Self {
+        if is_database_busy(&error) {
+            log::warn!("database busy: {error}");
+            Self::DatabaseBusy
+        } else {
+            log::error!("database error: {error}");
+            Self::InternalDatabaseError
+        }
+    }
+}
+
+/// SQLite reports a write lock it could not get within its busy timeout, and
+/// PostgreSQL a transaction that conflicted with a concurrent one.
+fn is_database_busy(error: &diesel::result::Error) -> bool {
+    use diesel::result::{DatabaseErrorKind, Error};
+
+    match error {
+        Error::DatabaseError(DatabaseErrorKind::SerializationFailure, _) => true,
+        Error::DatabaseError(_, info) => {
+            matches!(
+                info.message(),
+                "database is locked" | "database table is locked"
+            )
+        }
+        _ => false,
     }
 }
 
@@ -184,6 +227,9 @@ pub fn check_stored_rows(stored_rows: i64) -> HandlerResult<()> {
 
 impl From<diesel::result::Error> for HandlerError {
     fn from(error: diesel::result::Error) -> Self {
+        if is_database_busy(&error) {
+            return Self::database(error);
+        }
         Self::InternalDatabaseErrorWithContext(error.to_string())
     }
 }
@@ -239,4 +285,31 @@ macro_rules! get_db_conn {
             .await
             .expect("Couldn't get db connection from the pool")
     };
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod tests {
+    use actix_web::{ResponseError, http::StatusCode};
+    use diesel_async::SimpleAsyncConnection;
+
+    use super::HandlerError;
+
+    #[actix_rt::test]
+    async fn a_held_write_lock_is_reported_as_retryable() {
+        let (database, mut writer) = crate::database::TestFileDatabase::new().await;
+        writer.batch_execute("BEGIN IMMEDIATE;").await.unwrap();
+        let mut blocked = database.connect_without_waiting().await;
+        let error = blocked
+            .batch_execute("DELETE FROM account;")
+            .await
+            .unwrap_err();
+
+        let response = HandlerError::database(error).error_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            response
+                .headers()
+                .contains_key(actix_web::http::header::RETRY_AFTER)
+        );
+    }
 }

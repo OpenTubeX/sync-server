@@ -123,10 +123,10 @@ async fn get_encrypted_sync_manifest(
     let mut conn = get_db_conn!(pool);
     let documents = encrypted_sync::revisions(&mut conn, &account.id)
         .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?;
+        .map_err(HandlerError::database)?;
     let legacy_data = encrypted_sync::has_legacy_data(&mut conn, &account.id)
         .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?;
+        .map_err(HandlerError::database)?;
     let has_all_migrated_collections = LEGACY_ENCRYPTED_COLLECTIONS
         .iter()
         .all(|collection| documents.iter().any(|(name, _)| name == collection));
@@ -135,7 +135,7 @@ async fn get_encrypted_sync_manifest(
     let legacy_encrypted_data = !(has_all_migrated_collections && has_migrated_playback_speeds)
         && encrypted_sync::get_legacy_encrypted(&mut conn, &account.id)
             .await
-            .map_err(|_| HandlerError::InternalDatabaseError)?
+            .map_err(HandlerError::database)?
             .is_some();
 
     Ok(web::Json(EncryptedSyncManifest {
@@ -160,7 +160,7 @@ async fn get_legacy_encrypted_sync(
     let mut conn = get_db_conn!(pool);
     let document = encrypted_sync::get_legacy_encrypted(&mut conn, &account.id)
         .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?;
+        .map_err(HandlerError::database)?;
 
     Ok(web::Json(match document {
         Some(document) => EncryptedSyncCollectionResponse {
@@ -201,7 +201,7 @@ async fn get_encrypted_sync_collection(
         // payload would let them revert those changes with their next upload.
         let document = encrypted_sync::get_full(&mut conn, &account.id, &collection)
             .await
-            .map_err(|_| HandlerError::InternalDatabaseError)?;
+            .map_err(HandlerError::database)?;
         return Ok(web::Json(match document {
             Some((revision, base_revision, _)) if revision != base_revision => {
                 return Err(HandlerError::EncryptedSyncChangesPending);
@@ -222,11 +222,11 @@ async fn get_encrypted_sync_collection(
     if let Some(session) = session {
         encrypted_sync::mark_session_reads_changes(&mut conn, &session.id)
             .await
-            .map_err(|_| HandlerError::InternalDatabaseError)?;
+            .map_err(HandlerError::database)?;
     }
     let read = encrypted_sync::read_since(&mut conn, &account.id, &collection, since)
         .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?;
+        .map_err(HandlerError::database)?;
     Ok(web::Json(match read {
         Some(read) => EncryptedSyncCollectionResponse {
             collection,
@@ -298,7 +298,7 @@ async fn put_encrypted_sync_collection(
         form.activity.as_deref().map(|payload| (payload, now)),
     )
     .await
-    .map_err(|_| HandlerError::InternalDatabaseError)?
+    .map_err(HandlerError::database)?
     {
         encrypted_sync::SaveResult::Saved => {}
         encrypted_sync::SaveResult::Conflict => {
@@ -362,7 +362,7 @@ async fn append_encrypted_sync_change(
     // current may not read the collection before its first append.
     encrypted_sync::mark_session_reads_changes(&mut conn, &session.id)
         .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?;
+        .map_err(HandlerError::database)?;
     match encrypted_sync::append_change(
         &mut conn,
         &account.id,
@@ -374,7 +374,7 @@ async fn append_encrypted_sync_change(
         now,
     )
     .await
-    .map_err(|_| HandlerError::InternalDatabaseError)?
+    .map_err(HandlerError::database)?
     {
         encrypted_sync::SaveResult::Saved => {}
         encrypted_sync::SaveResult::Conflict => return Err(HandlerError::EncryptedSyncConflict),
@@ -406,10 +406,10 @@ async fn change_cursor(pool: &WebData, owner: &str, device: &str) -> HandlerResu
     let mut conn = get_db_conn!(pool);
     let revisions = encrypted_sync::revisions(&mut conn, owner)
         .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?;
+        .map_err(HandlerError::database)?;
     let events = sync_event::event_ids(&mut conn, owner, device, now_ms()?)
         .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?;
+        .map_err(HandlerError::database)?;
     use base64::Engine;
     use sha2::{Digest, Sha256};
     let bytes =
@@ -459,7 +459,7 @@ async fn get_sync_events(
     let mut conn = get_db_conn!(pool);
     let events = sync_event::list(&mut conn, &account.id, &session.device_id, now_ms()?)
         .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?;
+        .map_err(HandlerError::database)?;
     let events: Vec<_> = events
         .into_iter()
         .filter(|event| !event.recipient.is_empty() || event.id > query.since)
@@ -529,7 +529,7 @@ async fn send_device_request(
             diesel::result::DatabaseErrorKind::CheckViolation,
             _,
         ) => HandlerError::EncryptedSyncQuotaExceeded,
-        _ => HandlerError::InternalDatabaseError,
+        error => HandlerError::database(error),
     })?;
     notify(&account.id, Some(&form.recipient));
     Ok(HttpResponse::NoContent().finish())
@@ -546,7 +546,7 @@ async fn acknowledge_device_request(
     let mut conn = get_db_conn!(pool);
     sync_event::acknowledge(&mut conn, &account.id, &session.device_id, &event)
         .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?;
+        .map_err(HandlerError::database)?;
     notify(&account.id, Some(&session.device_id));
     Ok(HttpResponse::NoContent().finish())
 }

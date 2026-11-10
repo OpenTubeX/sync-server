@@ -200,7 +200,7 @@ async fn resolve_account_session(
             now,
         )
         .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?
+        .map_err(HandlerError::database)?
         .ok_or(HandlerError::InvalidToken);
     }
 
@@ -213,7 +213,7 @@ async fn resolve_account_session(
         .await
         .map_err(|error| match error {
             diesel::result::Error::NotFound => HandlerError::InvalidToken,
-            _ => HandlerError::InternalDatabaseError,
+            error => HandlerError::database(error),
         })
 }
 
@@ -667,7 +667,7 @@ pub(crate) async fn authenticate_session(
     let now = now_ms()?;
     let account = find_account_by_id(&mut conn, &claims.sub)
         .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?
+        .map_err(HandlerError::database)?
         .ok_or(HandlerError::AccountNotExists)?;
     let mut session = resolve_account_session(&mut conn, &account, &jwt, &claims, now).await?;
     if account_session::touch(
@@ -678,7 +678,7 @@ pub(crate) async fn authenticate_session(
         now,
     )
     .await
-    .map_err(|_| HandlerError::InternalDatabaseError)?
+    .map_err(HandlerError::database)?
     {
         session.last_active_at = now;
     }
@@ -720,11 +720,11 @@ async fn authorize_request(req: &ServiceRequest) -> Result<(), actix_web::Error>
     if !exempt {
         let encrypted_sync_enabled = encrypted_sync::exists(&mut conn, &account.id)
             .await
-            .map_err(|_| HandlerError::InternalDatabaseError)?;
+            .map_err(HandlerError::database)?;
         if encrypted_sync_enabled {
             let migration_complete = !encrypted_sync::has_legacy_data(&mut conn, &account.id)
                 .await
-                .map_err(|_| HandlerError::InternalDatabaseError)?;
+                .map_err(HandlerError::database)?;
             if migration_complete {
                 return Err(HandlerError::EncryptedSyncRequired.into());
             }
@@ -1544,7 +1544,7 @@ async fn delete_oidc_account_callback(
 
     let account = find_account_by_id(&mut conn, &account_id)
         .await
-        .map_err(|_| HandlerError::InternalDatabaseError)?
+        .map_err(HandlerError::database)?
         .ok_or(HandlerError::AccountNotExists)?;
     // the provider must confirm the owner of the account that asked for deletion
     if account.oidc_sub.as_deref() != Some(oidc_sub.as_str()) {
