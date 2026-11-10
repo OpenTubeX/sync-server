@@ -349,4 +349,6 @@ pub struct MetaResponseCapabilities {
     /// The configured `oidc.display_name`, for clients to label their login button.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oidc_display_name: Option<String>,
+    /// OIDC login and deletion pass the client's `state` back to its redirect URL.
+    pub oidc_state: bool,
 }

@@ -214,9 +214,19 @@ Authorization: <jwt>
 Cookie: Authorization=<jwt>
 ```
 
+To log in through OIDC, open `GET /v1/account/oidc/authenticate` in a browser
+with the `redirect_url` to return to. The server appends the session token to it
+as `token`.
+
 To delete an OIDC account, send an authenticated `POST /v1/account/oidc/delete`
 and open the returned `authorization_url` in a browser. The account is deleted
 once its owner signs in there.
+
+Both flows accept an optional `state`, as a query parameter for login and in the
+JSON body for deletion. It may hold up to 128 characters from `A-Z`, `a-z`,
+`0-9`, `-`, and `_`. The server appends it unchanged to the redirect URL, so
+the client can ignore redirects for flows it did not start. Servers that support
+it report `"oidc_state": true` in `GET /meta`.
 
 ### Capabilities
 
