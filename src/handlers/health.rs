@@ -107,6 +107,7 @@ async fn server_metainfo() -> HandlerResult<impl Responder> {
         capabilities: MetaResponseCapabilities {
             oidc: CONFIG.oidc.is_some(),
             oidc_display_name: oidc_display_name(CONFIG.oidc.as_ref()),
+            oidc_state: true,
         },
     }))
 }

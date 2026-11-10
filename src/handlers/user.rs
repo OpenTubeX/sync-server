@@ -40,6 +40,7 @@ const AUTH_HEADER_KEY: &str = "Authorization";
 const MIN_PASSWORD_LENGTH: usize = 8;
 const OIDC_ACCOUNT_PREFIX: &str = "OIDC-ACCOUNT-";
 const MAX_ENCRYPTED_DEVICE_INFO_BYTES: usize = 1024;
+const MAX_OIDC_CLIENT_STATE_LENGTH: usize = 128;
 
 /// Marker registered on scopes that remain reachable after an account has
 /// switched to encrypted sync.
@@ -874,7 +875,10 @@ mod tests {
             .split_for_parts();
         let api = serde_json::to_value(api).unwrap();
         for (path, expected) in [
-            ("/oidc/authenticate", vec!["redirect_url", "device_id"]),
+            (
+                "/oidc/authenticate",
+                vec!["redirect_url", "device_id", "state"],
+            ),
             ("/oidc/authenticate/callback", vec!["code", "state"]),
             ("/oidc/delete/callback", vec!["code", "state"]),
         ] {
@@ -891,18 +895,48 @@ mod tests {
     }
 
     mod redirect {
-        use crate::handlers::user::token_redirect_url;
+        use crate::handlers::user::{client_redirect_url, validate_oidc_client_state};
 
         #[test]
-        fn token_redirect_keeps_existing_query_and_fragment() {
+        fn client_redirect_keeps_existing_query_and_fragment() {
             assert_eq!(
-                token_redirect_url("myapp://oidc?client=1#done", "jwt").unwrap(),
+                client_redirect_url("myapp://oidc?client=1#done", &[("token", Some("jwt"))])
+                    .unwrap(),
                 "myapp://oidc?client=1&token=jwt#done"
             );
             assert_eq!(
-                token_redirect_url("https://client.example/cb", "jwt").unwrap(),
-                "https://client.example/cb?token=jwt"
+                client_redirect_url(
+                    "https://client.example/cb",
+                    &[("token", Some("jwt")), ("state", Some("a-b_C1"))]
+                )
+                .unwrap(),
+                "https://client.example/cb?token=jwt&state=a-b_C1"
             );
+        }
+
+        #[test]
+        fn client_redirect_leaves_the_url_alone_without_parameters() {
+            assert_eq!(
+                client_redirect_url("myapp://oidc", &[("state", None)]).unwrap(),
+                "myapp://oidc"
+            );
+            assert_eq!(
+                client_redirect_url("myapp://oidc", &[("token", Some("jwt")), ("state", None)])
+                    .unwrap(),
+                "myapp://oidc?token=jwt"
+            );
+        }
+
+        #[test]
+        fn client_state_is_bounded_and_url_safe() {
+            let longest = "a".repeat(128);
+            for state in [None, Some("a-b_C1"), Some(longest.as_str())] {
+                assert!(validate_oidc_client_state(state).is_ok(), "{state:?}");
+            }
+            let too_long = "a".repeat(129);
+            for state in ["", "a b", "a&token=x", "a=b", "a.b", "ä", too_long.as_str()] {
+                assert!(validate_oidc_client_state(Some(state)).is_err(), "{state}");
+            }
         }
     }
 
@@ -1232,6 +1266,10 @@ struct OidcAuthenticationRequest {
     /// Passes a `token` query parameter to the URL, which is a valid JWT for the authenticated account.
     redirect_url: String,
     device_id: Option<String>,
+    /// Up to 128 URL-safe characters (`A-Z`, `a-z`, `0-9`, `-`, `_`) that the server passes
+    /// back as a `state` query parameter, so the client can tie the redirect to the login it
+    /// started.
+    state: Option<String>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -1239,6 +1277,10 @@ struct OidcDeleteRequest {
     /// Url to redirect to once the account was deleted. Must be listed in the server's
     /// `oidc.allowed_redirect_urls`.
     redirect_url: String,
+    /// Up to 128 URL-safe characters (`A-Z`, `a-z`, `0-9`, `-`, `_`) that the server passes
+    /// back as a `state` query parameter, so the client can tie the redirect to the deletion
+    /// it started.
+    state: Option<String>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -1255,11 +1297,31 @@ enum OidcCallbackContext {
     Authenticate {
         redirect_url: String,
         device_id: String,
+        client_state: Option<String>,
     },
     Delete {
         redirect_url: String,
         account_id: String,
+        client_state: Option<String>,
     },
+}
+
+/// The client's own `state` only travels back to the client, but its length and characters
+/// are bounded so that it cannot bloat the challenge store or alter the redirect URL.
+fn validate_oidc_client_state(state: Option<&str>) -> HandlerResult<()> {
+    let valid = state.is_none_or(|state| {
+        (1..=MAX_OIDC_CLIENT_STATE_LENGTH).contains(&state.len())
+            && state
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    });
+    if !valid {
+        return Err(HandlerError::ValidationErrorWithContext(
+            "invalid state".to_owned(),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Only redirect to client URLs the operator allowed. The login flow passes the session
@@ -1319,14 +1381,17 @@ async fn authenticate_oidc_account(
     query: web::Query<OidcAuthenticationRequest>,
 ) -> HandlerResult<impl Responder> {
     validate_oidc_redirect_url(&query.redirect_url)?;
+    validate_oidc_client_state(query.state.as_deref())?;
     let device_id = supplied_or_random_device_id(query.device_id.as_deref())?;
+    let query = query.into_inner();
 
     let redirect_url = start_oidc_flow(
         &req,
         "authenticate_oidc_account_callback",
         &OidcCallbackContext::Authenticate {
-            redirect_url: query.redirect_url.clone(),
+            redirect_url: query.redirect_url,
             device_id,
+            client_state: query.state,
         },
     )
     .await?;
@@ -1360,6 +1425,7 @@ async fn authenticate_oidc_account_callback(
     let OidcCallbackContext::Authenticate {
         redirect_url,
         device_id,
+        client_state,
     } = context
     else {
         return Err(HandlerError::ValidationError);
@@ -1396,13 +1462,26 @@ async fn authenticate_oidc_account_callback(
     };
 
     let jwt = issue_account_session(&mut conn, &account, device_id).await?;
-    Ok(Redirect::to(token_redirect_url(&redirect_url, &jwt)?))
+    Ok(Redirect::to(client_redirect_url(
+        &redirect_url,
+        &[("token", Some(&jwt)), ("state", client_state.as_deref())],
+    )?))
 }
 
-/// Appends the token so that allowed URLs may already carry a query or fragment.
-fn token_redirect_url(redirect_url: &str, jwt: &str) -> HandlerResult<String> {
+/// Appends the present parameters so that allowed URLs may already carry a query or fragment.
+fn client_redirect_url(
+    redirect_url: &str,
+    params: &[(&str, Option<&str>)],
+) -> HandlerResult<String> {
+    let mut params = params
+        .iter()
+        .filter_map(|(name, value)| Some((*name, (*value)?)))
+        .peekable();
+    if params.peek().is_none() {
+        return Ok(redirect_url.to_owned());
+    }
     let mut url = url::Url::parse(redirect_url).map_err(|_| HandlerError::ValidationError)?;
-    url.query_pairs_mut().append_pair("token", jwt);
+    url.query_pairs_mut().extend_pairs(params);
     Ok(url.into())
 }
 
@@ -1423,6 +1502,8 @@ async fn delete_oidc_account(
         return Err(HandlerError::OidcLoginDisabledForAccount);
     }
     validate_oidc_redirect_url(&body.redirect_url)?;
+    validate_oidc_client_state(body.state.as_deref())?;
+    let body = body.into_inner();
 
     // Binding the flow to the authenticated account keeps a navigation that merely
     // passes through the provider from deleting whichever account signs in. The JSON
@@ -1431,8 +1512,9 @@ async fn delete_oidc_account(
         &req,
         "delete_oidc_account_callback",
         &OidcCallbackContext::Delete {
-            redirect_url: body.into_inner().redirect_url,
+            redirect_url: body.redirect_url,
             account_id: account.id,
+            client_state: body.state,
         },
     )
     .await?;
@@ -1452,10 +1534,13 @@ async fn delete_oidc_account_callback(
     let OidcCallbackContext::Delete {
         redirect_url,
         account_id,
+        client_state,
     } = context
     else {
         return Err(HandlerError::ValidationError);
     };
+    // built before deleting so that the deletion cannot end without its redirect
+    let redirect_url = client_redirect_url(&redirect_url, &[("state", client_state.as_deref())])?;
 
     let account = find_account_by_id(&mut conn, &account_id)
         .await

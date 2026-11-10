@@ -752,6 +752,7 @@ async fn metadata_is_public_and_reports_version_and_oidc_configuration() {
         "api": { "libretube-sync": env!("CARGO_PKG_VERSION") },
         "version": env!("CARGO_PKG_VERSION"),
         "oidc": CONFIG.oidc.is_some(),
+        "oidc_state": true,
     });
     if let Some(name) = crate::handlers::health::oidc_display_name(CONFIG.oidc.as_ref()) {
         expected["oidc_display_name"] = json!(name);
