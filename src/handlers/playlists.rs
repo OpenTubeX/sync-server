@@ -129,9 +129,7 @@ async fn create_playlist(
             let extended_playlist = ExtendedPlaylist::from_playlist(&playlist, 0);
             Ok(HttpResponse::Created().json(extended_playlist))
         }
-        Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
-            err.to_string(),
-        )),
+        Err(err) => Err(HandlerError::from(err)),
     }
 }
 
@@ -175,9 +173,7 @@ async fn update_playlist(
             let extended_playlist = ExtendedPlaylist::from_playlist(&playlist, video_count as u64);
             Ok(HttpResponse::Ok().json(extended_playlist))
         }
-        Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
-            err.to_string(),
-        )),
+        Err(err) => Err(HandlerError::from(err)),
     }
 }
 
@@ -194,9 +190,7 @@ async fn delete_playlist(
 
     match delete_playlist_by_id(&mut conn, &playlist_id, &account.id).await {
         Ok(()) => Ok(HttpResponse::Ok().json(())),
-        Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
-            err.to_string(),
-        )),
+        Err(err) => Err(HandlerError::from(err)),
     }
 }
 
@@ -297,8 +291,6 @@ async fn remove_from_playlist(
 
     match remove_video_from_playlist(&mut conn, &playlist_id, &account.id, &video_id).await {
         Ok(()) => Ok(HttpResponse::Ok()),
-        Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
-            err.to_string(),
-        )),
+        Err(err) => Err(HandlerError::from(err)),
     }
 }

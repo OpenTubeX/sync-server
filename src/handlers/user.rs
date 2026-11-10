@@ -349,7 +349,7 @@ async fn register_account(
             diesel::result::Error::DatabaseError(DatabaseErrorKind::UniqueViolation, _) => {
                 HandlerError::AccountNameTaken
             }
-            _ => HandlerError::InternalDatabaseErrorWithContext(err.to_string()),
+            _ => HandlerError::from(err),
         })?;
 
     let jwt = match issue_account_session(&mut conn, &account, device_id).await {
@@ -415,9 +415,7 @@ async fn delete_account(
 
     match delete_existing_account(&mut conn, &account.id).await {
         Ok(_) => Ok(HttpResponse::Ok()),
-        Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
-            err.to_string(),
-        )),
+        Err(err) => Err(HandlerError::from(err)),
     }
 }
 
@@ -1456,7 +1454,7 @@ async fn authenticate_oidc_account_callback(
         };
         insert_new_account(&mut conn, &account)
             .await
-            .map_err(|err| HandlerError::InternalDatabaseErrorWithContext(err.to_string()))?;
+            .map_err(HandlerError::from)?;
 
         account
     };
@@ -1554,8 +1552,6 @@ async fn delete_oidc_account_callback(
     match delete_existing_account(&mut conn, &account.id).await {
         Ok(true) => Ok(Redirect::to(redirect_url)),
         Ok(false) => Err(HandlerError::AccountNotExists),
-        Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
-            err.to_string(),
-        )),
+        Err(err) => Err(HandlerError::from(err)),
     }
 }

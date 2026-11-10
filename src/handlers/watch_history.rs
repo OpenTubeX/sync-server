@@ -253,9 +253,7 @@ async fn get_watch_history(
                 .collect::<Vec<_>>();
             Ok(HttpResponse::Ok().json(history))
         }
-        Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
-            err.to_string(),
-        )),
+        Err(err) => Err(HandlerError::from(err)),
     }
 }
 
@@ -346,9 +344,7 @@ async fn clear_watch_history(account: Account, pool: WebData) -> HandlerResult<i
 
     match clear_watch_history_by_account_id(&mut conn, &account.id).await {
         Ok(()) => Ok(HttpResponse::Ok()),
-        Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
-            err.to_string(),
-        )),
+        Err(err) => Err(HandlerError::from(err)),
     }
 }
 
@@ -363,8 +359,6 @@ async fn remove_from_watch_history(
 
     match remove_video_from_watch_history(&mut conn, &account.id, &video_id).await {
         Ok(()) => Ok(HttpResponse::Ok()),
-        Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
-            err.to_string(),
-        )),
+        Err(err) => Err(HandlerError::from(err)),
     }
 }

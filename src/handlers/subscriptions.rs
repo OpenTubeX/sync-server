@@ -135,9 +135,7 @@ async fn get_subscription(
             Some(channel) => Ok(HttpResponse::Ok().json(channel)),
             None => Err(HandlerError::NotSubscribed),
         },
-        Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
-            err.to_string(),
-        )),
+        Err(err) => Err(HandlerError::from(err)),
     }
 }
 
@@ -229,9 +227,7 @@ async fn get_subscription_groups(account: Account, pool: WebData) -> HandlerResu
 
             Ok(HttpResponse::Ok().json(groups))
         }
-        Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
-            err.to_string(),
-        )),
+        Err(err) => Err(HandlerError::from(err)),
     }
 }
 
@@ -274,9 +270,7 @@ async fn create_subscription_group(
 
     match create_new_subscription_group(&mut conn, subscription_group).await {
         Ok(group) => Ok(HttpResponse::Ok().json(group)),
-        Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
-            err.to_string(),
-        )),
+        Err(err) => Err(HandlerError::from(err)),
     }
 }
 
@@ -297,9 +291,7 @@ async fn update_subscription_group(
     match update_existing_subscription_group(&mut conn, subscription_group).await {
         Ok(group) => Ok(HttpResponse::Ok().json(group)),
         Err(diesel::result::Error::NotFound) => Err(HandlerError::SubscriptionGroupNotFound),
-        Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
-            err.to_string(),
-        )),
+        Err(err) => Err(HandlerError::from(err)),
     }
 }
 
@@ -314,9 +306,7 @@ async fn delete_subscription_group(
 
     match delete_subscription_group_by_id(&mut conn, &subscription_group_id, &account.id).await {
         Ok(_) => Ok(HttpResponse::Ok()),
-        Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
-            err.to_string(),
-        )),
+        Err(err) => Err(HandlerError::from(err)),
     }
 }
 
@@ -381,8 +371,6 @@ async fn remove_from_subscription_group(
         .await
     {
         Ok(_) => Ok(HttpResponse::Ok()),
-        Err(err) => Err(HandlerError::InternalDatabaseErrorWithContext(
-            err.to_string(),
-        )),
+        Err(err) => Err(HandlerError::from(err)),
     }
 }
