@@ -166,6 +166,21 @@ impl HandlerError {
             Self::InternalDatabaseError
         }
     }
+
+    /// Every pooled connection may be waiting for the write lock, so a pool
+    /// timeout is as retryable as the busy error those connections will get.
+    pub fn pool(error: diesel_async::pooled_connection::bb8::RunError) -> Self {
+        match error {
+            diesel_async::pooled_connection::bb8::RunError::TimedOut => {
+                log::warn!("database busy: no pooled connection became available");
+                Self::DatabaseBusy
+            }
+            diesel_async::pooled_connection::bb8::RunError::User(error) => {
+                log::error!("database connection error: {error}");
+                Self::InternalDatabaseError
+            }
+        }
+    }
 }
 
 /// SQLite reports a write lock it could not get within its busy timeout, and
@@ -283,7 +298,7 @@ macro_rules! get_db_conn {
         $pool
             .get()
             .await
-            .expect("Couldn't get db connection from the pool")
+            .map_err($crate::handlers::HandlerError::pool)?
     };
 }
 
@@ -305,6 +320,44 @@ mod tests {
             .unwrap_err();
 
         let response = HandlerError::database(error).error_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            response
+                .headers()
+                .contains_key(actix_web::http::header::RETRY_AFTER)
+        );
+    }
+
+    /// Requests that cannot get a connection, because every pooled one waits
+    /// for the write lock, get a retryable response instead of a dropped
+    /// connection.
+    #[actix_rt::test]
+    async fn an_exhausted_pool_is_reported_as_retryable() {
+        use actix_web::{App, HttpResponse, get, test, web};
+        use diesel_async::pooled_connection::{AsyncDieselConnectionManager, bb8::Pool};
+
+        #[get("/")]
+        async fn handler(pool: crate::WebData) -> super::HandlerResult<HttpResponse> {
+            let _conn = crate::get_db_conn!(pool);
+            Ok(HttpResponse::Ok().finish())
+        }
+
+        let pool = Pool::builder()
+            .max_size(1)
+            .connection_timeout(std::time::Duration::from_millis(10))
+            .build(AsyncDieselConnectionManager::<crate::DbConnection>::new(
+                ":memory:",
+            ))
+            .await
+            .unwrap();
+        let _held = pool.get_owned().await.unwrap();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(pool.clone()))
+                .service(handler),
+        )
+        .await;
+        let response = test::call_service(&app, test::TestRequest::get().to_request()).await;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(
             response
