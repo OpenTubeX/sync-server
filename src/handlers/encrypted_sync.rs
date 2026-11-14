@@ -457,13 +457,15 @@ async fn get_sync_events(
     query: web::Query<EventsQuery>,
 ) -> HandlerResult<impl Responder> {
     let mut conn = get_db_conn!(pool);
-    let events = sync_event::list(&mut conn, &account.id, &session.device_id, now_ms()?)
-        .await
-        .map_err(HandlerError::database)?;
-    let events: Vec<_> = events
-        .into_iter()
-        .filter(|event| !event.recipient.is_empty() || event.id > query.since)
-        .collect();
+    let events = sync_event::list(
+        &mut conn,
+        &account.id,
+        &session.device_id,
+        &query.since,
+        now_ms()?,
+    )
+    .await
+    .map_err(HandlerError::database)?;
     Ok(HttpResponse::Ok()
         .insert_header(("Cache-Control", "no-store"))
         .json(events))
@@ -697,6 +699,7 @@ mod migration_tests {
             let events = crate::database::sync_event::list(
                 &mut conn,
                 &account.id,
+                "",
                 "",
                 super::now_ms().unwrap(),
             )
@@ -1235,8 +1238,20 @@ mod change_tests {
             .await
             .unwrap()
             .spawn_blocking(|conn| {
+                use diesel::migration::MigrationSource;
+
+                let migrations = MIGRATIONS.migrations().unwrap();
+                let changes = migrations
+                    .iter()
+                    .find(|migration| {
+                        migration
+                            .name()
+                            .to_string()
+                            .ends_with("_encrypted_sync_changes")
+                    })
+                    .unwrap();
                 Ok(conn
-                    .revert_last_migration(MIGRATIONS)
+                    .revert_migration(&**changes)
                     .map_err(|error| error.to_string()))
             })
             .await
