@@ -137,12 +137,28 @@ pub fn dedup_channels(channels: &mut Vec<Channel>) {
     channels.retain(|channel| seen.insert(channel.clone()));
 }
 
+#[cfg(not(test))]
+async fn fetch_channel_feed(channel_id: &str) -> Result<RssChannel, ytrss::YouTubeError> {
+    RssChannel::fetch_from_channel_id(channel_id).await
+}
+
+/// YouTube's feeds fail intermittently with 404 and 500 responses, so tests
+/// serve the feed of [`test::FEED_CHANNEL`] instead, and no other.
+#[cfg(test)]
+async fn fetch_channel_feed(channel_id: &str) -> Result<RssChannel, ytrss::YouTubeError> {
+    let (id, name) = test::FEED_CHANNEL;
+    if channel_id != id {
+        return Err(ytrss::YouTubeError::ConnectionError);
+    }
+    RssChannel::from_xml(&test::feed("channel", id, name))
+}
+
 /// Validate a channel against its YouTube RSS feed.
 ///
 /// Deliberately takes no database connection so that callers cannot hold one
 /// across the network round-trip.
 pub async fn validate_channel_against_youtube(channel: &mut Channel) -> HandlerResult<()> {
-    let rss_channel = RssChannel::fetch_from_channel_id(&channel.id)
+    let rss_channel = fetch_channel_feed(&channel.id)
         .await
         .map_err(|_| HandlerError::YouTubeConnectError)?;
 
@@ -240,7 +256,7 @@ pub async fn validate_videos_against_youtube(
         }
     }
 
-    let channel_rss = RssChannel::fetch_from_channel_id(&channel.id)
+    let channel_rss = fetch_channel_feed(&channel.id)
         .await
         .map_err(|_| HandlerError::YouTubeConnectError)?;
     validate_videos_against_feed(video_datas, needs_validation, channel, &channel_rss)
@@ -384,7 +400,7 @@ fn validate_playlist_information(
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use ytrss::{RssChannel, RssPlaylist};
 
     use crate::{
@@ -396,8 +412,11 @@ mod test {
         },
     };
 
+    /// The channel whose feed handlers can fetch in tests, and its canonical name.
+    pub(crate) const FEED_CHANNEL: (&str, &str) = ("UC_feed_channel", "Canonical Feed Channel");
+
     /// A feed as served by YouTube, with one video entry.
-    fn feed(kind: &str, owner_id: &str, owner_name: &str) -> String {
+    pub(crate) fn feed(kind: &str, owner_id: &str, owner_name: &str) -> String {
         format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns:media="http://search.yahoo.com/mrss/" xmlns="http://www.w3.org/2005/Atom">
@@ -568,69 +587,57 @@ mod test {
         assert!(!verify_image_url("ftp://i1.ytimg.com/vi/x/hqdefault.jpg"));
     }
 
-    #[actix_rt::test]
-    async fn test_channel_validator() {
-        let channel_rss = RssChannel::fetch_from_channel_id("UC8-Th83bH_thdKZDJCrn88g")
-            .await
-            .unwrap();
+    #[test]
+    fn test_channel_validator() {
+        let channel_rss = channel_feed();
+        let submitted = |name: &str, avatar: &str| Channel {
+            id: "UC_channel".to_string(),
+            name: name.to_string(),
+            avatar: Some(avatar.to_string()),
+            verified: true,
+        };
 
         assert!(
             validate_channel_information(
-                Channel {
-                    id: "UC8-Th83bH_thdKZDJCrn88g".to_string(),
-                    name: "The Tonight Show Starring Jimmy Fallon".to_string(),
-                    avatar: Some("https://i1.ytimg.com/vi/hTC6Xa5TrRc/hqdefault.jpg".to_string(),),
-                    verified: true,
-                },
+                submitted("Canonical Name", "https://i1.ytimg.com/vi/x/hqdefault.jpg"),
                 &channel_rss
             )
             .is_ok()
         );
-
         assert!(
             validate_channel_information(
-                Channel {
-                    id: "UC8-Th83bH_thdKZDJCrn88g".to_string(),
-                    name: "The Tonight Show Starring Jimmy Fallon".to_string(),
-                    avatar: Some(
-                        "https://i1.example.com/vi/hTC6Xa5TrRc/hqdefault.jpg".to_string(),
-                    ),
-                    verified: true,
-                },
+                submitted(
+                    "Canonical Name",
+                    "https://i1.example.com/vi/x/hqdefault.jpg"
+                ),
                 &channel_rss
             )
             .is_err()
         );
-
         assert!(
             validate_channel_information(
-                Channel {
-                    id: "UC8-Th83bH_thdKZDJCrn88g".to_string(),
-                    name: "Wrong channel name".to_string(),
-                    avatar: Some(
-                        "https://i1.example.com/vi/hTC6Xa5TrRc/hqdefault.jpg".to_string(),
-                    ),
-                    verified: true,
-                },
+                submitted(
+                    "Wrong channel name",
+                    "https://i1.ytimg.com/vi/x/hqdefault.jpg"
+                ),
                 &channel_rss
             )
             .is_err()
         );
     }
 
-    #[actix_rt::test]
-    async fn test_channel_validator_mismatching_uploader_names() {
+    #[test]
+    fn test_channel_validator_mismatching_uploader_names() {
         // the RSS uploader name is different to the one on the web UI
-        let channel_rss = RssChannel::fetch_from_channel_id("UCjp_3PEaOau_nT_3vnqKIvg")
-            .await
-            .unwrap();
+        let channel_rss =
+            RssChannel::from_xml(&feed("channel", "UC_channel", "Junya.じゅんや")).unwrap();
 
         assert!(
             validate_channel_information(
                 Channel {
-                    id: "UCjp_3PEaOau_nT_3vnqKIvg".to_string(),
+                    id: "UC_channel".to_string(),
                     name: "Junya Official Channel".to_string(),
-                    avatar: Some("https://yt3.googleusercontent.com/ytc/AIdro_mFt9iiVlgxD1gBW74I1o6H8xFtOg5AwqPj2_1JKHJ4UJg=s160-c-k-c0x00ffffff-no-rj".to_string()),
+                    avatar: Some("https://yt3.googleusercontent.com/a.jpg".to_string()),
                     verified: true,
                 },
                 &channel_rss
@@ -639,52 +646,25 @@ mod test {
         );
     }
 
-    #[actix_rt::test]
-    async fn test_video_validator() {
-        let video = CreateVideo {
-            id: "kMO1L5J1cn8".to_string(),
-            title: "Minecraft Livestream [FaceCam] | Kotti".to_string(),
-            upload_date: 1549036231000, /* 2019-02-01T16:50:31+00:00 */
-            thumbnail_url: "https://i4.ytimg.com/vi/kMO1L5J1cn8/hqdefault.jpg".to_string(),
-            duration: 4352,
-            uploader: Channel {
-                id: "UCWnQYRWgTbsLTDOAVc3uzRg".to_string(),
-                name: "KottiXD".to_string(),
-                avatar: Some("https://yt3.googleusercontent.com/ytc/AIdro_lBXTw2HqumabqUMrMcWlB5BVUa-bDCP1YQ0Jwf89C6RMY=s160-c-k-c0x00ffffff-no-rj".to_string()),
-                verified: false,
-            },
-        };
-
-        let channel_rss = RssChannel::fetch_from_channel_id(&video.uploader.id)
-            .await
-            .unwrap();
-        assert!(validate_video_information(video, &channel_rss).is_ok());
-    }
-
-    #[actix_rt::test]
-    async fn test_playlist_validator() {
-        let channel_rss = RssPlaylist::fetch_from_playlist_id("PLI-n-55RUT-_Ej39IlAxon_hOJWeET7cI")
-            .await
-            .unwrap();
-
-        let playlist = ExtendedPlaylist {
-            id: "PLI-n-55RUT-_Ej39IlAxon_hOJWeET7cI".to_string(),
-            title: "Best German Songs".to_string(),
-            description: "Songs 2026 - Songs with Lyrics Playlist - My Mix - Mix Songs - Music Playlist 2026. Welcome to a curated playlist featuring the best English songs with lyrics that speak to the heart. Sing along to powerful lyrics that capture the essence of love, life, and everything in between. Mix, songs 2026, new songs 2026, top songs, best songs, my mix, mix songs, songs mix, my mix playlist, songs playlist, songs with lyrics playlist, my playlist, good songs, english songs. Songs January 2026, february 2026, march 2026, april 2026, may 2026, june 2026, july 2026, august 2026, september 2026, october 2026, november 2026, december 2026 etc. Songs 2027 - music playlist 2025.".to_string(),
-            thumbnail_url: Some("https://i.ytimg.com/vi/M1P0HAr-8zg/hqdefault.jpg?sqp=-oaymwEXCNACELwBSFryq4qpAwkIARUAAIhCGAE=&rs=AOn4CLBXQ360CqPdgkFrha1H3l9cx23I8A".to_string()),
-            video_count: Some(120),
-        };
-
-        assert!(validate_playlist_information(playlist, &channel_rss).is_ok());
-
-        let playlist = ExtendedPlaylist {
-            id: "PLI-n-55RUT-_Ej39IlAxon_hOJWeET7cI".to_string(),
-            title: "Best German Songs".to_string(),
+    #[test]
+    fn test_playlist_validator() {
+        let playlist_rss =
+            RssPlaylist::from_xml(&feed("playlist", "UC_owner", "Playlist Title")).unwrap();
+        let playlist = |video_count| ExtendedPlaylist {
+            id: "PL_playlist".to_string(),
+            title: "Submitted Title".to_string(),
             description: "".to_string(),
-            thumbnail_url: Some("https://i.ytimg.com/vi/M1P0HAr-8zg/hqdefault.jpg?sqp=-oaymwEXCNACELwBSFryq4qpAwkIARUAAIhCGAE=&rs=AOn4CLBXQ360CqPdgkFrha1H3l9cx23I8A".to_string()),
-            video_count: Some(0), // impossible video count because feed is larger than 0
+            thumbnail_url: Some("https://i.ytimg.com/vi/in_feed/hqdefault.jpg".to_string()),
+            video_count: Some(video_count),
         };
 
-        assert!(validate_playlist_information(playlist, &channel_rss).is_err());
+        assert_eq!(
+            validate_playlist_information(playlist(120), &playlist_rss)
+                .unwrap()
+                .title,
+            "Playlist Title"
+        );
+        // impossible video count because the feed holds a video
+        assert!(validate_playlist_information(playlist(0), &playlist_rss).is_err());
     }
 }

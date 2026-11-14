@@ -856,16 +856,9 @@ fn test_app_parts(
     app
 }
 
-/// The canonical name of the channel the metadata tests submit.
-const FEED_CHANNEL_ID: &str = "UC8-Th83bH_thdKZDJCrn88g";
-
-async fn canonical_feed_channel_name() -> String {
-    ytrss::RssChannel::fetch_from_channel_id(FEED_CHANNEL_ID)
-        .await
-        .unwrap()
-        .name()
-        .to_owned()
-}
+/// The channel the metadata tests submit, and the canonical name its feed reports.
+const FEED_CHANNEL_ID: &str = crate::validation::test::FEED_CHANNEL.0;
+const CANONICAL_FEED_CHANNEL_NAME: &str = crate::validation::test::FEED_CHANNEL.1;
 
 /// Regression test: PATCH inserted missing entries without charging the quota.
 #[actix_web::test]
@@ -937,7 +930,7 @@ async fn history_keeps_stored_metadata_it_cannot_verify() {
                 "upload_date": 1,
                 "thumbnail_url": "https://i.ytimg.com/vi/forged/hqdefault.jpg",
                 "duration": 1,
-                "uploader": { "id": channel_id, "name": "Tonight Show", "verified": true }
+                "uploader": { "id": channel_id, "name": "Feed Channel", "verified": true }
             },
             "metadata": { "added_date": 1, "watched_state": "completed" }
         }))
@@ -948,7 +941,7 @@ async fn history_keeps_stored_metadata_it_cannot_verify() {
     assert_eq!(stored["video"]["duration"], 60);
     assert_eq!(
         stored["video"]["uploader"]["name"],
-        canonical_feed_channel_name().await
+        CANONICAL_FEED_CHANNEL_NAME
     );
 }
 
@@ -960,7 +953,7 @@ async fn bulk_subscriptions_store_canonical_names_for_duplicates() {
     let token = seed_account(&pool).await;
     let app = test::init_service(test_app_parts(pool)).await;
 
-    let channel = json!({ "id": FEED_CHANNEL_ID, "name": "Tonight Show", "verified": true });
+    let channel = json!({ "id": FEED_CHANNEL_ID, "name": "Feed Channel", "verified": true });
     let request = test::TestRequest::put()
         .uri("/v1/subscriptions/bulk")
         .insert_header(("Authorization", token.clone()))
@@ -976,8 +969,5 @@ async fn bulk_subscriptions_store_canonical_names_for_duplicates() {
         .insert_header(("Authorization", token))
         .to_request();
     let subscriptions: Value = test::call_and_read_body_json(&app, request).await;
-    assert_eq!(
-        subscriptions[0]["name"],
-        canonical_feed_channel_name().await
-    );
+    assert_eq!(subscriptions[0]["name"], CANONICAL_FEED_CHANNEL_NAME);
 }
