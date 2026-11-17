@@ -1,0 +1,16 @@
+name: Token expiry
+
+# Opens an issue in OpenTubeX/OpenTubeX when a secret here expires within 30 days or stops working.
+on:
+  schedule:
+    - cron: '23 6 * * 1'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  check:
+    uses: OpenTubeX/OpenTubeX/.github/workflows/token-expiry.yml@development
+    permissions:
+      contents: read
+    secrets: inherit
