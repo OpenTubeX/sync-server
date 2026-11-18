@@ -80,6 +80,7 @@ mod tests {
                 assert_eq!(json["capabilities"]["external_media_positions"], 1);
                 assert_eq!(json["capabilities"]["seen_rss_items"], 1);
                 assert_eq!(json["capabilities"]["notification_dismissals"], 1);
+                assert_eq!(json["capabilities"]["separate_profiles"], 1);
                 match &policy {
                     Some(url) => assert_eq!(json["privacy_policy_url"], *url),
                     None => assert!(json.get("privacy_policy_url").is_none()),

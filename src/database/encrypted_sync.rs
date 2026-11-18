@@ -359,6 +359,32 @@ pub async fn save(
     .await
 }
 
+/// Delete a collection and its appended changes. Returns whether it existed.
+pub async fn delete(
+    conn: &mut DbConnection,
+    owner_id: &str,
+    collection_name: &str,
+) -> Result<bool, DbError> {
+    conn.transaction(async |conn| {
+        diesel::delete(
+            encrypted_sync_change::table
+                .filter(encrypted_sync_change::account_id.eq(owner_id))
+                .filter(encrypted_sync_change::collection.eq(collection_name)),
+        )
+        .execute(conn)
+        .await?;
+        let deleted = diesel::delete(
+            encrypted_sync
+                .filter(account_id.eq(owner_id))
+                .filter(collection.eq(collection_name)),
+        )
+        .execute(conn)
+        .await?;
+        Ok(deleted > 0)
+    })
+    .await
+}
+
 /// Read a collection for a client holding revision `since`. When the change log
 /// covers that revision, only the later changes are returned. Otherwise the
 /// full payload is returned with every change appended after it.

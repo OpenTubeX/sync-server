@@ -41,6 +41,8 @@ pub struct SyncCapabilities {
     pub live_sync: u8,
     /// Collections accept appended changes and incremental reads.
     pub collection_changes: u8,
+    /// Separate profiles have their own collections and can delete them.
+    pub separate_profiles: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
