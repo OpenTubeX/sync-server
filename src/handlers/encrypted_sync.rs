@@ -69,6 +69,7 @@ impl ScopedHandler for EncryptedSyncHandler {
             .service(get_legacy_encrypted_sync)
             .service(get_encrypted_sync_collection)
             .service(put_encrypted_sync_collection)
+            .service(delete_encrypted_sync_collection)
             .service(append_encrypted_sync_change)
     }
 }
@@ -89,16 +90,42 @@ pub(crate) fn sync_capabilities() -> SyncCapabilities {
         notification_dismissals: 1,
         live_sync: 1,
         collection_changes: 1,
+        separate_profiles: 1,
     }
 }
 
+/// Collections that a separate profile keeps for itself, as `<base>.<scope>`.
+const SCOPED_COLLECTIONS: [&str; 4] = ["history", "playlists", "subscriptions", "watchStats"];
+/// Clients hex-encode the profile ID, which has at most 64 bytes.
+const MAX_SCOPE_LENGTH: usize = 128;
+
+/// The base collection of a separate profile's collection, such as `history`
+/// for `history.<scope>`. The scope is lowercase hex, so it never contains
+/// another separator or a path segment.
+fn scoped_collection_base(collection: &str) -> Option<&str> {
+    let (base, scope) = collection.split_once('.')?;
+    let valid_scope = !scope.is_empty()
+        && scope.len() <= MAX_SCOPE_LENGTH
+        && scope.len() % 2 == 0
+        && scope
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'));
+    (valid_scope && SCOPED_COLLECTIONS.contains(&base)).then_some(base)
+}
+
 fn collection_limit(collection: &str) -> HandlerResult<usize> {
+    // A separate profile's collection has the limits of its base collection.
+    if let Some(base) = scoped_collection_base(collection) {
+        return collection_limit(base);
+    }
     match collection {
         "settings" => Ok(2 * MEBIBYTE),
         // Keys of the notifications read or removed on any device, capped by clients.
         "notificationDismissals" => Ok(2 * MEBIBYTE),
         // `playbackSpeeds` remains readable for migration into `settings`.
         "sessions" | "sessionsV2" | "profiles" | "playbackSpeeds" => Ok(8 * MEBIBYTE),
+        // Names and colors of the profiles that keep their data separate.
+        "separateProfiles" => Ok(8 * MEBIBYTE),
         // Per-device watch time totals are merged by clients.
         "watchStats" | "liveReminders" => Ok(8 * MEBIBYTE),
         // Playback positions of media opened by URL instead of from YouTube.
@@ -318,6 +345,31 @@ async fn put_encrypted_sync_collection(
         revision: next_revision,
         ..Default::default()
     }))
+}
+
+/// Deletes a separate profile's collection with its changes, once the profile
+/// is deleted. Other collections are shared by every profile and stay.
+#[utoipa::path(responses((status = NO_CONTENT)), security(("api_jwt_token" = [])))]
+#[delete("/{collection}")]
+async fn delete_encrypted_sync_collection(
+    account: Account,
+    pool: WebData,
+    collection: web::Path<String>,
+) -> HandlerResult<impl Responder> {
+    let collection = collection.into_inner();
+    if scoped_collection_base(&collection).is_none() {
+        return Err(HandlerError::ValidationErrorWithContext(
+            "only separate profile collections can be deleted".to_owned(),
+        ));
+    }
+    let mut conn = get_db_conn!(pool);
+    let deleted = encrypted_sync::delete(&mut conn, &account.id, &collection)
+        .await
+        .map_err(HandlerError::database)?;
+    if deleted {
+        notify(&account.id, None);
+    }
+    Ok(HttpResponse::NoContent().finish())
 }
 
 #[utoipa::path(request_body = PutEncryptedSync, responses((status = OK, body = EncryptedSyncCollectionResponse)), security(("api_jwt_token" = [])))]
@@ -593,6 +645,34 @@ mod tests {
         assert_eq!(super::sync_capabilities().seen_videos, 1);
         assert!(collection_limit("unknown").is_err());
     }
+
+    #[test]
+    fn separate_profile_collections_have_their_base_limits() {
+        assert_eq!(super::sync_capabilities().separate_profiles, 1);
+        assert_eq!(collection_limit("separateProfiles").unwrap(), 8 * MEBIBYTE);
+        assert_eq!(collection_limit("history.6162").unwrap(), 64 * MEBIBYTE);
+        assert_eq!(collection_limit("playlists.6162").unwrap(), 64 * MEBIBYTE);
+        assert_eq!(
+            collection_limit("subscriptions.6162").unwrap(),
+            16 * MEBIBYTE
+        );
+        assert_eq!(collection_limit("watchStats.6162").unwrap(), 8 * MEBIBYTE);
+        let longest = format!("history.{}", "ab".repeat(64));
+        assert!(collection_limit(&longest).is_ok());
+        for invalid in [
+            "history.",
+            "history.616",
+            "history.ABCD",
+            "history.61.62",
+            "history.61/62",
+            "settings.6162",
+            "profiles.6162",
+            "separateProfiles.6162",
+        ] {
+            assert!(collection_limit(invalid).is_err(), "{invalid}");
+        }
+        assert!(collection_limit(&format!("history.{}", "ab".repeat(65))).is_err());
+    }
 }
 
 #[cfg(all(test, feature = "sqlite"))]
@@ -604,6 +684,92 @@ mod migration_tests {
     use diesel_migrations::MigrationHarness;
 
     use crate::{DbConnection, MIGRATIONS, models::Account};
+
+    #[actix_rt::test]
+    async fn deleting_a_separate_profile_collection_keeps_the_shared_ones() {
+        let pool = Pool::builder()
+            .max_size(1)
+            .build(AsyncDieselConnectionManager::<DbConnection>::new(
+                ":memory:",
+            ))
+            .await
+            .unwrap();
+        let account = Account {
+            id: "owner".into(),
+            name_hash: "owner-hash".into(),
+            password_hash: None,
+            oidc_sub: None,
+            legacy_tokens_enabled: false,
+            session_generation: 0,
+        };
+        {
+            let mut conn = pool.get().await.unwrap();
+            conn.spawn_blocking(|conn| {
+                conn.run_pending_migrations(MIGRATIONS).unwrap();
+                conn.batch_execute(
+                    "INSERT INTO account (id, name_hash) VALUES ('owner', 'owner-hash');",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        }
+        let app = test::init_service(
+            App::new().app_data(web::Data::new(pool.clone())).service(
+                web::scope("/sync")
+                    .service(super::get_encrypted_sync_manifest)
+                    .service(super::get_encrypted_sync_collection)
+                    .service(super::put_encrypted_sync_collection)
+                    .service(super::delete_encrypted_sync_collection),
+            ),
+        )
+        .await;
+        for collection in ["history", "history.6162"] {
+            let request = test::TestRequest::put()
+                .uri(&format!("/sync/{collection}"))
+                .set_json(serde_json::json!({ "revision": 0, "payload": "ciphertext" }))
+                .to_request();
+            request.extensions_mut().insert(account.clone());
+            assert_eq!(
+                test::call_service(&app, request).await.status().as_u16(),
+                200
+            );
+        }
+
+        // Shared collections belong to every profile, so they cannot be deleted.
+        for collection in ["history", "settings", "history.6162"] {
+            let request = test::TestRequest::delete()
+                .uri(&format!("/sync/{collection}"))
+                .to_request();
+            request.extensions_mut().insert(account.clone());
+            let status = test::call_service(&app, request).await.status().as_u16();
+            assert_eq!(
+                status,
+                if collection == "history.6162" {
+                    204
+                } else {
+                    400
+                }
+            );
+        }
+        // Deleting it again succeeds, as a retry after a lost reply would.
+        let request = test::TestRequest::delete()
+            .uri("/sync/history.6162")
+            .to_request();
+        request.extensions_mut().insert(account.clone());
+        assert_eq!(
+            test::call_service(&app, request).await.status().as_u16(),
+            204
+        );
+
+        let request = test::TestRequest::get().uri("/sync").to_request();
+        request.extensions_mut().insert(account.clone());
+        let manifest: serde_json::Value = test::call_and_read_body_json(&app, request).await;
+        assert_eq!(
+            manifest["collections"],
+            serde_json::json!([{ "collection": "history", "revision": 1 }])
+        );
+    }
 
     #[actix_rt::test]
     async fn old_and_new_clients_can_alternate_collection_writes_without_losing_activity() {
