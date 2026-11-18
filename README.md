@@ -234,17 +234,17 @@ it report `"oidc_state": true` in `GET /meta`.
 `privacy_policy_url` if configured. Clients use the capabilities to decide which
 features they can use.
 
-| Capability                                                                                                                            | Meaning                                                            |
-| ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| `encrypted_sync`                                                                                                                      | [Encrypted sync](#encrypted-sync) is available                     |
-| `collection_changes`                                                                                                                  | Collections accept [incremental changes](#incremental-changes)     |
-| `live_sync`                                                                                                                           | [Change notifications and device requests](#live-sync)             |
-| `account_sessions`                                                                                                                    | Tokens are bound to [account sessions](#account-sessions)          |
-| `key_pairing`                                                                                                                         | [Secure device pairing](#secure-device-pairing)                    |
-| `bulk_sync`                                                                                                                           | Plaintext subscriptions and watch history accept bulk uploads      |
-| `history_page_size`                                                                                                                   | Maximum page size for plaintext watch history                      |
-| `seen_videos`, `seen_posts`, `seen_rss_items`, `watch_stats`, `live_reminders`, `external_media_positions`, `notification_dismissals` | The matching [collection](#collections) exists                     |
-| `separate_profiles`                                                                                                                   | [Separate profiles](#separate-profiles) have their own collections |
+| Capability                                                                                                                                              | Meaning                                                            |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `encrypted_sync`                                                                                                                                        | [Encrypted sync](#encrypted-sync) is available                     |
+| `collection_changes`                                                                                                                                    | Collections accept [incremental changes](#incremental-changes)     |
+| `live_sync`                                                                                                                                             | [Change notifications and device requests](#live-sync)             |
+| `account_sessions`                                                                                                                                      | Tokens are bound to [account sessions](#account-sessions)          |
+| `key_pairing`                                                                                                                                           | [Secure device pairing](#secure-device-pairing)                    |
+| `bulk_sync`                                                                                                                                             | Plaintext subscriptions and watch history accept bulk uploads      |
+| `history_page_size`                                                                                                                                     | Maximum page size for plaintext watch history                      |
+| `seen_videos`, `seen_posts`, `seen_rss_items`, `watch_stats`, `live_reminders`, `external_media_positions`, `notification_dismissals`, `sync_deletions` | The matching [collection](#collections) exists                     |
+| `separate_profiles`                                                                                                                                     | [Separate profiles](#separate-profiles) have their own collections |
 
 ### Encrypted sync
 
@@ -278,6 +278,7 @@ features they can use.
 | `seenPosts`                                               | 16 MiB     | `seen_posts`               |
 | `seenRssItems`                                            | 16 MiB     | `seen_rss_items`           |
 | `externalMediaPositions` (media opened by URL)            | 16 MiB     | `external_media_positions` |
+| `syncDeletions` (deletions confirmed on a device)         | 16 MiB     | `sync_deletions`           |
 | `playlists`, `history`                                    | 64 MiB     |                            |
 
 All collections of an account, including pending changes, are limited to

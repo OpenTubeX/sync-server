@@ -88,6 +88,7 @@ pub(crate) fn sync_capabilities() -> SyncCapabilities {
         external_media_positions: 1,
         seen_rss_items: 1,
         notification_dismissals: 1,
+        sync_deletions: 1,
         live_sync: 1,
         collection_changes: 1,
         separate_profiles: 1,
@@ -130,6 +131,8 @@ fn collection_limit(collection: &str) -> HandlerResult<usize> {
         "watchStats" | "liveReminders" => Ok(8 * MEBIBYTE),
         // Playback positions of media opened by URL instead of from YouTube.
         "externalMediaPositions" => Ok(16 * MEBIBYTE),
+        // Deletions devices confirmed, so other devices apply them without asking.
+        "syncDeletions" => Ok(16 * MEBIBYTE),
         "subscriptions" | "playlistBookmarks" | "seenVideos" | "seenPosts" | "seenRssItems" => {
             Ok(16 * MEBIBYTE)
         }
@@ -640,6 +643,8 @@ mod tests {
             2 * MEBIBYTE
         );
         assert_eq!(super::sync_capabilities().notification_dismissals, 1);
+        assert_eq!(collection_limit("syncDeletions").unwrap(), 16 * MEBIBYTE);
+        assert_eq!(super::sync_capabilities().sync_deletions, 1);
         assert_eq!(super::sync_capabilities().live_reminders, 1);
         assert_eq!(super::sync_capabilities().watch_stats, 1);
         assert_eq!(super::sync_capabilities().seen_videos, 1);
