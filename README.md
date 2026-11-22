@@ -287,10 +287,13 @@ that sync `seenVideos` cannot erase post marks.
 
 #### Separate profiles
 
-Clients store the subscriptions, history, playlists and watch statistics of a
-separate profile in `subscriptions.<scope>`, `history.<scope>`,
-`playlists.<scope>` and `watchStats.<scope>`. Each has the size limit of its
-base collection. `<scope>` is the profile ID in lowercase hex, up to 128
+Clients store the subscriptions, history, playlists, watch statistics, saved
+playlists and seen videos and posts of a separate profile in
+`subscriptions.<scope>`, `history.<scope>`, `playlists.<scope>`,
+`watchStats.<scope>`, `playlistBookmarks.<scope>`, `seenVideos.<scope>` and
+`seenPosts.<scope>`. Each has the size limit of its base collection.
+`separate_profiles` is `2` on servers that accept all of them; servers that
+report `1` lack the saved playlists and seen marks. `<scope>` is the profile ID in lowercase hex, up to 128
 digits. `separateProfiles` holds the names and colors of these profiles. Older
 clients never read these collections, so they can't mix a separate profile's
 data into their own.

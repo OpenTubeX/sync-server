@@ -91,12 +91,20 @@ pub(crate) fn sync_capabilities() -> SyncCapabilities {
         sync_deletions: 1,
         live_sync: 1,
         collection_changes: 1,
-        separate_profiles: 1,
+        separate_profiles: 2,
     }
 }
 
 /// Collections that a separate profile keeps for itself, as `<base>.<scope>`.
-const SCOPED_COLLECTIONS: [&str; 4] = ["history", "playlists", "subscriptions", "watchStats"];
+const SCOPED_COLLECTIONS: [&str; 7] = [
+    "history",
+    "playlists",
+    "subscriptions",
+    "watchStats",
+    "playlistBookmarks",
+    "seenVideos",
+    "seenPosts",
+];
 /// Clients hex-encode the profile ID, which has at most 64 bytes.
 const MAX_SCOPE_LENGTH: usize = 128;
 
@@ -653,7 +661,7 @@ mod tests {
 
     #[test]
     fn separate_profile_collections_have_their_base_limits() {
-        assert_eq!(super::sync_capabilities().separate_profiles, 1);
+        assert_eq!(super::sync_capabilities().separate_profiles, 2);
         assert_eq!(collection_limit("separateProfiles").unwrap(), 8 * MEBIBYTE);
         assert_eq!(collection_limit("history.6162").unwrap(), 64 * MEBIBYTE);
         assert_eq!(collection_limit("playlists.6162").unwrap(), 64 * MEBIBYTE);
@@ -662,6 +670,12 @@ mod tests {
             16 * MEBIBYTE
         );
         assert_eq!(collection_limit("watchStats.6162").unwrap(), 8 * MEBIBYTE);
+        for collection in ["playlistBookmarks", "seenVideos", "seenPosts"] {
+            assert_eq!(
+                collection_limit(&format!("{collection}.6162")).unwrap(),
+                16 * MEBIBYTE
+            );
+        }
         let longest = format!("history.{}", "ab".repeat(64));
         assert!(collection_limit(&longest).is_ok());
         for invalid in [
@@ -673,6 +687,7 @@ mod tests {
             "settings.6162",
             "profiles.6162",
             "separateProfiles.6162",
+            "seenRssItems.6162",
         ] {
             assert!(collection_limit(invalid).is_err(), "{invalid}");
         }
