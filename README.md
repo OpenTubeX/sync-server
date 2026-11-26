@@ -50,6 +50,20 @@ The public instance's privacy policy is in [PRIVACY.md](./PRIVACY.md).
    echo "POSTGRES_PASSWORD=$(openssl rand -hex 32)" >> .env
    ```
 
+   On Windows, run this in PowerShell instead:
+
+   ```powershell
+   function New-Secret {
+     $bytes = New-Object byte[] 32
+     [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+     -join ($bytes | ForEach-Object { $_.ToString('x2') })
+   }
+   $secret = New-Secret
+   Set-Content .env -Encoding ascii "SECRET_KEY=$secret", "USERNAME_SECRET=$secret"
+   # PostgreSQL only:
+   Add-Content .env -Encoding ascii "POSTGRES_PASSWORD=$(New-Secret)"
+   ```
+
 3. SQLite only: let the container user (uid `10001`) write the data directory
    (see [File permissions](#file-permissions)):
 
@@ -57,9 +71,21 @@ The public instance's privacy policy is in [PRIVACY.md](./PRIVACY.md).
    mkdir -p ./data && sudo chown -R 10001:10001 ./data
    ```
 
-4. Start the server with `docker compose up -d`. It listens on
-   `127.0.0.1:8080`.
-5. Point a reverse proxy at it. See [Reverse proxy](#reverse-proxy).
+   With Docker Desktop on Windows or macOS, skip this and store the database
+   in a Docker volume instead. Replace `- ./data:/app/data` under `volumes:`
+   with `- sync-data:/app/data`, and add this at the end of the file:
+
+   ```yaml
+   volumes:
+     sync-data:
+   ```
+
+4. Start the server with `docker compose up -d`, or
+   `docker compose -f docker-compose.postgres.yml up -d` for PostgreSQL. It
+   listens on `127.0.0.1:8080`.
+5. Point a reverse proxy at it. See [Reverse proxy](#reverse-proxy). To
+   connect devices on your local network without one, see
+   [Local network](#local-network).
 
 ### Configuration
 
@@ -123,6 +149,30 @@ limit. Configure the server to read the real address from `X-Forwarded-For`:
 - Every `/v1/...` path also works without the `/v1` prefix. Proxy or WAF rules
   for `/v1/account/delete` must also cover `/account/delete`.
 
+### Local network
+
+To let devices on your local network connect without a reverse proxy, change
+these lines in the compose file, then start the server again with the same
+command as in the quick start:
+
+- `"127.0.0.1:8080:8080"` to `"8080:8080"`, so other devices can reach the
+  port
+- `"TRUST_FORWARDED_FOR=true"` to `"TRUST_FORWARDED_FOR=false"`, because
+  requests no longer come through a proxy
+
+In OpenTubeX, enter `http://<the computer's IP address>:8080` as the sync
+server URL. If other devices can't connect, allow incoming connections to port
+8080 in the computer's firewall.
+
+`"8080:8080"` publishes the port on every network the computer is connected to.
+If it is also on a network you don't trust, publish it on the local address
+only, for example `"192.168.1.20:8080:8080"`.
+
+Plain HTTP sends your account password and session tokens unencrypted, so use
+it only on a network you trust. Current OpenTubeX versions encrypt synced data
+end to end, but older clients that sync in plaintext expose it too. Pairing a
+device with a QR code needs HTTPS.
+
 ### File permissions
 
 The image runs as uid `10001`, but a bind-mounted directory keeps its host
@@ -132,8 +182,8 @@ ownership. SQLite deployments need a data directory that uid can write:
 mkdir -p ./data && sudo chown -R 10001:10001 ./data
 ```
 
-- Otherwise the server fails with a database connection timeout, not a
-  permission error.
+- Otherwise the server exits with `unable to open database file` or
+  `attempt to write a readonly database`.
 - Upgrading from an image that ran as root needs the same command. It only
   changes ownership, not data.
 - Without `sudo`, run the container as the directory's owner instead:
