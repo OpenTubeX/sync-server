@@ -30,7 +30,7 @@ COPY --from=builder /app/target/release/opentubex-sync /app/opentubex-sync-serve
 # ownership and shadows the ownership set here, so the host directory must be
 # owned by this uid or the database and its WAL sidecars are not writable:
 #     sudo chown -R 10001:10001 ./data
-# See the "Running as non-root" section in README.md.
+# See the "File permissions" section in README.md.
 RUN addgroup -S -g 10001 opentubex \
     && adduser -S -u 10001 -G opentubex opentubex \
     && mkdir -p /app/data \
