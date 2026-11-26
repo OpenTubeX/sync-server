@@ -93,6 +93,19 @@ async fn main() -> io::Result<()> {
         );
     }
 
+    // The pool hides why a connection failed behind a timeout after 30 seconds,
+    // so open one connection directly first to report the actual error at once.
+    #[cfg(feature = "sqlite")]
+    if let Err(err) = connect_sqlite(&CONFIG.database_url).await {
+        log::error!(
+            "Could not open the database at {}: {err}. Check that the database and its \
+             directory are writable by the user the server runs as (uid 10001 in the \
+             Docker image).",
+            CONFIG.database_url
+        );
+        std::process::exit(1);
+    }
+
     // initialize DB pool outside `HttpServer::new` so that it is shared across all workers
     let pool = match initialize_db_pool(&CONFIG.database_url).await {
         Ok(pool) => pool,
@@ -189,6 +202,20 @@ fn configure_api_routes(config: &mut ServiceConfig<'_>) {
 #[cfg(all(test, feature = "sqlite"))]
 mod route_tests;
 
+#[cfg(feature = "sqlite")]
+async fn connect_sqlite(url: &str) -> diesel::ConnectionResult<DbConnection> {
+    let mut conn = DbConnection::establish(url).await?;
+    // `foreign_keys` defaults to OFF in SQLite and must be enabled per
+    // connection, otherwise none of the ON DELETE CASCADE constraints
+    // fire and deleting an account orphans all of its rows.
+    conn.batch_execute(
+        "PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 30000; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;",
+    )
+    .await
+    .map_err(|err| diesel::ConnectionError::BadConnection(err.to_string()))?;
+    Ok(conn)
+}
+
 /// Initialize database connection pool based on `DATABASE_URL` environment variable.
 ///
 /// See more: <https://docs.rs/diesel-async/latest/diesel_async/pooled_connection/index.html#modules>.
@@ -198,18 +225,7 @@ async fn initialize_db_pool(db_url: &str) -> Result<DbPool, PoolError> {
         let mut manager_config = ManagerConfig::default();
         manager_config.custom_setup = Box::new(|url| {
             let url = url.to_owned();
-            Box::pin(async move {
-                let mut conn = DbConnection::establish(&url).await?;
-                // `foreign_keys` defaults to OFF in SQLite and must be enabled per
-                // connection, otherwise none of the ON DELETE CASCADE constraints
-                // fire and deleting an account orphans all of its rows.
-                conn.batch_execute(
-                    "PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 30000; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;",
-                )
-                .await
-                .map_err(|err| diesel::ConnectionError::BadConnection(err.to_string()))?;
-                Ok(conn)
-            })
+            Box::pin(async move { connect_sqlite(&url).await })
         });
         AsyncDieselConnectionManager::<DbConnection>::new_with_config(db_url, manager_config)
     };
@@ -262,15 +278,11 @@ fn back_up_sqlite_before_migration(
 async fn run_migrations(pool: &DbPool, database_url: &str, approval: Option<&str>) {
     // https://github.com/diesel-rs/diesel_async/discussions/268
     //
-    // An unwritable data directory shows up here as a pool timeout rather than a
-    // permission error, which is confusing enough to be worth calling out.
-    let conn = pool.get_owned().await.unwrap_or_else(|err| {
-        panic!(
-            "could not open the database at {database_url}: {err}. \
-             If this is a timeout, check that the database and its directory are \
-             writable by the user the server runs as (uid 10001 in the Docker image)."
-        )
-    });
+    // Leave out the URL, which contains the password for PostgreSQL.
+    let conn = pool
+        .get_owned()
+        .await
+        .unwrap_or_else(|err| panic!("could not connect to the database: {err}"));
 
     #[cfg(feature = "sqlite")]
     {
@@ -306,6 +318,8 @@ async fn run_migrations(pool: &DbPool, database_url: &str, approval: Option<&str
 
     #[cfg(feature = "postgres")]
     {
+        // Only the SQLite pre-migration backup needs the URL.
+        let _ = database_url;
         // must be spawned blocking, otherwise this would raise 'can call blocking only when running on the multi-threaded runtime': see https://github.com/rwf2/Rocket/pull/2648
         let approval = approval.map(str::to_owned);
         actix_web::rt::task::spawn_blocking(move || {
