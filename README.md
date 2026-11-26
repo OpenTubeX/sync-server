@@ -80,8 +80,9 @@ The public instance's privacy policy is in [PRIVACY.md](./PRIVACY.md).
      sync-data:
    ```
 
-4. Start the server with `docker compose up -d`. It listens on
-   `127.0.0.1:8080`.
+4. Start the server with `docker compose up -d`, or
+   `docker compose -f docker-compose.postgres.yml up -d` for PostgreSQL. It
+   listens on `127.0.0.1:8080`.
 5. Point a reverse proxy at it. See [Reverse proxy](#reverse-proxy). To
    connect devices on your local network without one, see
    [Local network](#local-network).
@@ -151,7 +152,8 @@ limit. Configure the server to read the real address from `X-Forwarded-For`:
 ### Local network
 
 To let devices on your local network connect without a reverse proxy, change
-these lines in the compose file, then run `docker compose up -d` again:
+these lines in the compose file, then start the server again with the same
+command as in the quick start:
 
 - `"127.0.0.1:8080:8080"` to `"8080:8080"`, so other devices can reach the
   port
@@ -162,9 +164,14 @@ In OpenTubeX, enter `http://<the computer's IP address>:8080` as the sync
 server URL. If other devices can't connect, allow incoming connections to port
 8080 in the computer's firewall.
 
+`"8080:8080"` publishes the port on every network the computer is connected to.
+If it is also on a network you don't trust, publish it on the local address
+only, for example `"192.168.1.20:8080:8080"`.
+
 Plain HTTP sends your account password and session tokens unencrypted, so use
-it only on a network you trust. Your synced data stays end-to-end encrypted.
-Pairing a device with a QR code needs HTTPS.
+it only on a network you trust. Current OpenTubeX versions encrypt synced data
+end to end, but older clients that sync in plaintext expose it too. Pairing a
+device with a QR code needs HTTPS.
 
 ### File permissions
 
